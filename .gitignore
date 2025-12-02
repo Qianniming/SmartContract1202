@@ -1,0 +1,33 @@
+### Node / JavaScript
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dist/
+
+### Hardhat / Solidity
+artifacts/
+cache/
+coverage/
+.env
+
+### Foundry
+out/
+broadcast/
+
+### Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+### IDE / OS
+.trae/
+.DS_Store
+Thumbs.db
+
+### Misc
+*.log
+
