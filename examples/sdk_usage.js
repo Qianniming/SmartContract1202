@@ -12,17 +12,15 @@ async function main() {
   const aiepOwner = new AIEP(owner, contractAddress);
   const aiepProvider = new AIEP(provider, contractAddress);
 
-  const regTx = await aiepOwner.registerAgent("ipfs://meta", await signer.getAddress());
-  const regRc = await regTx.wait();
-  const agentId = 1n;
   const key = ethers.keccak256(ethers.toUtf8Bytes("auth-key"));
-  await aiepOwner.createAuthorizedKey(agentId, key, 0, Permissions.READ | Permissions.WRITE);
-  const ok = await aiepProvider.verifyAuthorizedKey(agentId, key, Permissions.READ);
+  await aiepOwner.setAgentSigner(await signer.getAddress());
+  await aiepOwner.createAuthorizedKey(key, 0, Permissions.READ | Permissions.WRITE);
+  const ok = await aiepProvider.verifyAuthorizedKey(key, Permissions.READ);
   if (!ok) throw new Error("verify failed");
 
   const now = Math.floor(Date.now() / 1000);
-  await aiepOwner.depositToAgent(agentId, ethers.parseEther("1"));
-  await aiepProvider.delegatedPayEth(agentId, await other.getAddress(), ethers.parseEther("0.1"), now + 3600, signer);
+  await aiepOwner.depositToAgent(ethers.parseEther("1"));
+  await aiepProvider.delegatedPayEth(await other.getAddress(), ethers.parseEther("0.1"), now + 3600, signer);
 }
 
 main().catch(console.error);

@@ -1,6 +1,6 @@
 from web3 import Web3
 from eth_account import Account
-from sdk.python.aiep import AIEP, PERMISSIONS
+from sdk.python.aiep import AIEP
 from eth_utils import keccak
 
 def main():
@@ -13,18 +13,11 @@ def main():
 
     aiep = AIEP(w3, contract)
 
-    aiep.register_agent("ipfs://meta", owner_pk)
-    agent_id = 1
     signer_addr = Account.from_key(signer_pk).address
-    aiep.set_agent_signer(agent_id, signer_addr, owner_pk)
+    aiep.set_agent_signer(signer_addr, owner_pk)
 
-    key_hash = keccak(text="auth-key").hex()
-    aiep.create_authorized_key(agent_id, key_hash, 0, PERMISSIONS["READ"] | PERMISSIONS["WRITE"], owner_pk)
-    ok = aiep.verify_authorized_key(agent_id, key_hash, PERMISSIONS["READ"])
-    print("verify:", ok)
-
-    aiep.deposit_to_agent(agent_id, w3.to_wei(1, "ether"), owner_pk)
-    aiep.delegated_pay_eth(agent_id, other_addr, w3.to_wei(0.1, "ether"), w3.eth.get_block("latest").timestamp + 3600, signer_pk)
+    aiep.deposit_to_agent(w3.to_wei(1, "ether"), owner_pk)
+    aiep.delegated_pay_eth(other_addr, w3.to_wei(0.1, "ether"), w3.eth.get_block("latest").timestamp + 3600, signer_pk)
 
 if __name__ == "__main__":
     import os

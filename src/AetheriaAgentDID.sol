@@ -2,72 +2,47 @@
 pragma solidity ^0.8.19;
 
 contract AetheriaAgentDID {
-    struct AgentKey {
-        bytes32 keyHash;
-        uint256 expireAt;
-        bool enabled;
-    }
+    
 
-    struct AuthorizedKey {
-        bytes32 keyHash;
-        uint64 expireAt;
-        uint128 permissions;
-        bool enabled;
-    }
+    address private owner;
+    address private signer;
+    string private metadataURI;
 
-    struct AgentInfo {
-        address owner;
-        address signer;
-        string metadataURI;
-        mapping(bytes32 => AgentKey) agentKeys;
-        mapping(bytes32 => AuthorizedKey) authorizedKeys;
-    }
+    
 
-    mapping(uint256 => AgentInfo) private agents;
-    mapping(uint256 => bool) private frozen;
-    uint256 private nextAgentId = 1;
-    mapping(uint256 => uint256) private nonces;
-    mapping(uint256 => uint256) private ethBalances;
-    mapping(uint256 => mapping(address => uint256)) private erc20Balances;
-    mapping(uint256 => mapping(string => string)) private serviceEndpoints;
-    mapping(uint256 => string[]) private serviceKeys;
+    bool private frozen;
+    uint256 private nonce;
+    uint256 private ethBalance;
+    mapping(address => uint256) private erc20Balances;
     uint256 private reentrancyLock;
-    uint256 private constant MAX_SERVICE_KEYS = 50;
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 private constant CREATE_AUTHORIZED_KEY_TYPEHASH = keccak256("CreateAuthorizedKey(uint256 agentId,bytes32 keyHash,uint256 expireAt,uint256 permissions,uint256 nonce,uint256 deadline)");
-    bytes32 private constant PAY_ETH_TYPEHASH = keccak256("PayEth(uint256 agentId,address to,uint256 amount,uint256 nonce,uint256 deadline)");
-    bytes32 private constant PAY_ERC20_TYPEHASH = keccak256("PayERC20(uint256 agentId,address token,address to,uint256 amount,uint256 nonce,uint256 deadline)");
-    bytes32 private constant EXECUTE_TYPEHASH = keccak256("Execute(uint256 agentId,address target,uint256 value,bytes32 dataHash,uint256 nonce,uint256 deadline)");
+    bytes32 private constant PAY_ETH_TYPEHASH = keccak256("PayEth(address to,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant PAY_ERC20_TYPEHASH = keccak256("PayERC20(address token,address to,uint256 amount,uint256 nonce,uint256 deadline)");
+    bytes32 private constant EXECUTE_TYPEHASH = keccak256("Execute(address target,uint256 value,bytes32 dataHash,uint256 nonce,uint256 deadline)");
     bytes32 private constant NAME_HASH = keccak256(bytes("AetheriaAgentDID"));
     bytes32 private constant VERSION_HASH = keccak256(bytes("1"));
     uint256 private constant SECP256K1_N_DIV_2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
 
-    event AgentRegistered(uint256 indexed agentId, address indexed owner, string metadataURI);
-    event AgentKeySet(uint256 indexed agentId, bytes32 indexed keyHash, uint256 expireAt, bool enabled);
-    event AuthorizedKeyCreated(uint256 indexed agentId, bytes32 indexed keyHash, uint256 expireAt, uint256 permissions, bool enabled);
-    event AuthorizedKeyRevoked(uint256 indexed agentId, bytes32 indexed keyHash);
-    event MetadataUpdated(uint256 indexed agentId, string metadataURI);
-    event AgentFrozen(uint256 indexed agentId);
-    event AgentUnfrozen(uint256 indexed agentId);
-    event AgentSignerSet(uint256 indexed agentId, address indexed signer);
-    event DelegatedAuthorizedKeyCreated(uint256 indexed agentId, bytes32 indexed keyHash, uint256 expireAt, uint256 permissions);
-    event AgentOwnershipTransferred(uint256 indexed agentId, address indexed previousOwner, address indexed newOwner);
-    event AgentDeposited(uint256 indexed agentId, address indexed from, uint256 amount);
-    event AgentPaid(uint256 indexed agentId, address indexed to, uint256 amount);
-    event AgentDepositedERC20(uint256 indexed agentId, address indexed token, address indexed from, uint256 amount);
-    event AgentPaidERC20(uint256 indexed agentId, address indexed token, address indexed to, uint256 amount);
-    event ServiceEndpointSet(uint256 indexed agentId, string key, string value);
-    event DelegatedExecuted(uint256 indexed agentId, address indexed target, uint256 value, bytes data);
-    event AgentKeyDisabled(uint256 indexed agentId, bytes32 indexed keyHash);
+    event AgentInitialized(address indexed owner, string metadataURI);
+    event MetadataUpdated(string metadataURI);
+    event AgentFrozen();
+    event AgentUnfrozen();
+    event AgentSignerSet(address indexed signer);
+    event AgentOwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event AgentDeposited(address indexed from, uint256 amount);
+    event AgentPaid(address indexed to, uint256 amount);
+    event AgentDepositedERC20(address indexed token, address indexed from, uint256 amount);
+    event AgentPaidERC20(address indexed token, address indexed to, uint256 amount);
+    event DelegatedExecuted(address indexed target, uint256 value, bytes data);
 
-    modifier onlyOwnerOf(uint256 agentId) {
-        require(agents[agentId].owner == msg.sender, "not owner");
+    modifier onlyOwner() {
+        require(owner == msg.sender, "not owner");
         _;
     }
 
-    modifier notFrozen(uint256 agentId) {
-        require(!frozen[agentId], "frozen");
+    modifier notFrozen() {
+        require(!frozen, "frozen");
         _;
     }
 
@@ -78,176 +53,82 @@ contract AetheriaAgentDID {
         reentrancyLock = 0;
     }
 
-    constructor(string memory metadataURI, address signer) {
-        if (bytes(metadataURI).length != 0 || signer != address(0)) {
-            uint256 agentId = nextAgentId++;
-            agents[agentId].owner = msg.sender;
-            agents[agentId].metadataURI = metadataURI;
-            if (signer != address(0)) {
-                agents[agentId].signer = signer;
-                emit AgentSignerSet(agentId, signer);
-            }
-            emit AgentRegistered(agentId, msg.sender, metadataURI);
+    constructor(address _owner, address _signer, string memory _metadataURI) {
+        require(_owner != address(0), "owner cannot be zero");
+        owner = _owner;
+        metadataURI = _metadataURI;
+        ethBalance = address(this).balance;
+        if (_signer != address(0)) {
+            signer = _signer;
+            emit AgentSignerSet(_signer);
         }
+        emit AgentInitialized(_owner, _metadataURI);
     }
 
-    function registerAgent(string calldata metadataURI, address signer) external returns (uint256 agentId) {
-        agentId = nextAgentId++;
-        agents[agentId].owner = msg.sender;
-        agents[agentId].metadataURI = metadataURI;
-        if (signer != address(0)) {
-            agents[agentId].signer = signer;
-            emit AgentSignerSet(agentId, signer);
-        }
-        emit AgentRegistered(agentId, msg.sender, metadataURI);
+    function ownerOf() external view returns (address) {
+        return owner;
     }
 
-    function ownerOf(uint256 agentId) external view returns (address) {
-        return agents[agentId].owner;
+    function setAgentSigner(address _signer) external onlyOwner notFrozen {
+        signer = _signer;
+        emit AgentSignerSet(_signer);
     }
 
-    function setAgentSigner(uint256 agentId, address signer) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        agents[agentId].signer = signer;
-        emit AgentSignerSet(agentId, signer);
-    }
-
-    function transferAgentOwnership(uint256 agentId, address newOwner) external onlyOwnerOf(agentId) notFrozen(agentId) {
+    function transferAgentOwnership(address newOwner) external onlyOwner notFrozen {
         require(newOwner != address(0), "zero addr");
-        address prev = agents[agentId].owner;
-        agents[agentId].owner = newOwner;
-        emit AgentOwnershipTransferred(agentId, prev, newOwner);
+        address prev = owner;
+        owner = newOwner;
+        emit AgentOwnershipTransferred(prev, newOwner);
     }
 
-    function setAgentKey(uint256 agentId, bytes32 keyHash, uint256 expireAt) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        require(keyHash != bytes32(0), "bad key");
-        AgentKey storage k = agents[agentId].agentKeys[keyHash];
-        k.keyHash = keyHash;
-        k.expireAt = expireAt;
-        k.enabled = true;
-        emit AgentKeySet(agentId, keyHash, expireAt, true);
+
+    function updateMetadata(string calldata _metadataURI) external onlyOwner notFrozen {
+        metadataURI = _metadataURI;
+        emit MetadataUpdated(_metadataURI);
     }
 
-    function createAuthorizedKey(uint256 agentId, bytes32 keyHash, uint256 expireAt, uint256 permissions) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        require(keyHash != bytes32(0), "bad key");
-        AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
-        a.keyHash = keyHash;
-        require(expireAt <= type(uint64).max, "expireAt overflow");
-        require(permissions <= type(uint128).max, "permissions overflow");
-        a.expireAt = uint64(expireAt);
-        a.permissions = uint128(permissions);
-        a.enabled = true;
-        emit AuthorizedKeyCreated(agentId, keyHash, expireAt, permissions, true);
+    function freezeAgent() external onlyOwner {
+        frozen = true;
+        emit AgentFrozen();
     }
 
-    function delegatedCreateAuthorizedKey(
-        uint256 agentId,
-        bytes32 keyHash,
-        uint256 expireAt,
-        uint256 permissions,
-        uint256 deadline,
-        bytes calldata signature
-    ) external notFrozen(agentId) nonReentrant {
-        require(block.timestamp <= deadline, "expired");
-        address signer = agents[agentId].signer;
-        require(signer != address(0), "no signer");
-        uint256 nonce = nonces[agentId];
-        bytes32 structHash = keccak256(abi.encode(
-            CREATE_AUTHORIZED_KEY_TYPEHASH,
-            agentId,
-            keyHash,
-            expireAt,
-            permissions,
-            nonce,
-            deadline
-        ));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        address recovered = _recover(digest, signature);
-        require(recovered == signer, "bad sig");
-        nonces[agentId] = nonce + 1;
-        AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
-        a.keyHash = keyHash;
-        require(expireAt <= type(uint64).max, "expireAt overflow");
-        require(permissions <= type(uint128).max, "permissions overflow");
-        a.expireAt = uint64(expireAt);
-        a.permissions = uint128(permissions);
-        a.enabled = true;
-        emit DelegatedAuthorizedKeyCreated(agentId, keyHash, expireAt, permissions);
+    function unfreezeAgent() external onlyOwner {
+        frozen = false;
+        emit AgentUnfrozen();
     }
 
-    function revokeAuthorizedKey(uint256 agentId, bytes32 keyHash) external onlyOwnerOf(agentId) {
-        AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
-        a.enabled = false;
-        a.expireAt = 0;
-        a.permissions = 0;
-        emit AuthorizedKeyRevoked(agentId, keyHash);
+    function getMetadata() external view returns (string memory) {
+        return metadataURI;
     }
 
-    function verifyAgentKey(uint256 agentId, bytes32 keyHash) external view returns (bool) {
-        if (agents[agentId].owner == address(0)) return false;
-        if (frozen[agentId]) return false;
-        AgentKey storage k = agents[agentId].agentKeys[keyHash];
-        if (!k.enabled) return false;
-        if (k.expireAt != 0 && block.timestamp > k.expireAt) return false;
-        return k.keyHash == keyHash;
+    function getNonce() external view returns (uint256) {
+        return nonce;
     }
 
-    function verifyAuthorizedKey(uint256 agentId, bytes32 keyHash, uint256 requiredPermissions) external view returns (bool) {
-        if (agents[agentId].owner == address(0)) return false;
-        if (frozen[agentId]) return false;
-        AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
-        if (!a.enabled) return false;
-        if (a.expireAt != 0 && block.timestamp > a.expireAt) return false;
-        if ((uint256(a.permissions) & requiredPermissions) != requiredPermissions) return false;
-        return a.keyHash == keyHash;
+    function balanceOf() external view returns (uint256) {
+        return ethBalance;
     }
 
-    function updateMetadata(uint256 agentId, string calldata metadataURI) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        agents[agentId].metadataURI = metadataURI;
-        emit MetadataUpdated(agentId, metadataURI);
+    function balanceOfERC20(address token) external view returns (uint256) {
+        return erc20Balances[token];
     }
 
-    function freezeAgent(uint256 agentId) external onlyOwnerOf(agentId) {
-        frozen[agentId] = true;
-        emit AgentFrozen(agentId);
-    }
-
-    function unfreezeAgent(uint256 agentId) external onlyOwnerOf(agentId) {
-        frozen[agentId] = false;
-        emit AgentUnfrozen(agentId);
-    }
-
-    function getMetadata(uint256 agentId) external view returns (string memory) {
-        return agents[agentId].metadataURI;
-    }
-
-    function getNonce(uint256 agentId) external view returns (uint256) {
-        return nonces[agentId];
-    }
-
-    function balanceOf(uint256 agentId) external view returns (uint256) {
-        return ethBalances[agentId];
-    }
-
-    function balanceOfERC20(uint256 agentId, address token) external view returns (uint256) {
-        return erc20Balances[agentId][token];
-    }
-
-    function depositToAgent(uint256 agentId) external payable notFrozen(agentId) {
-        require(agents[agentId].owner != address(0), "no agent");
+    function depositToAgent() external payable notFrozen {
+        require(owner != address(0), "no agent");
         require(msg.value > 0, "no value");
-        ethBalances[agentId] += msg.value;
-        emit AgentDeposited(agentId, msg.sender, msg.value);
+        ethBalance += msg.value;
+        emit AgentDeposited(msg.sender, msg.value);
     }
 
-    function depositERC20(uint256 agentId, address token, uint256 amount) external notFrozen(agentId) {
-        require(agents[agentId].owner != address(0), "no agent");
+    function depositERC20(address token, uint256 amount) external notFrozen {
+        require(owner != address(0), "no agent");
         require(amount > 0, "no value");
         uint256 balBefore = IERC20(token).balanceOf(address(this));
         ERC20Safe.safeTransferFrom(token, msg.sender, address(this), amount);
         uint256 balAfter = IERC20(token).balanceOf(address(this));
         uint256 received = balAfter - balBefore;
-        erc20Balances[agentId][token] += received;
-        emit AgentDepositedERC20(agentId, token, msg.sender, received);
+        erc20Balances[token] += received;
+        emit AgentDepositedERC20(token, msg.sender, received);
     }
 
     function _domainSeparator() internal view returns (bytes32) {
@@ -276,151 +157,105 @@ contract AetheriaAgentDID {
     }
 
     function delegatedPayEth(
-        uint256 agentId,
         address payable to,
         uint256 amount,
         uint256 deadline,
         bytes calldata signature
-    ) external notFrozen(agentId) nonReentrant {
+    ) external notFrozen nonReentrant {
         require(block.timestamp <= deadline, "expired");
-        address signer = agents[agentId].signer;
-        require(signer != address(0), "no signer");
-        uint256 nonce = nonces[agentId];
+        address s = signer;
+        require(s != address(0), "no signer");
+        uint256 n = nonce;
         bytes32 structHash = keccak256(abi.encode(
             PAY_ETH_TYPEHASH,
-            agentId,
             to,
             amount,
-            nonce,
+            n,
             deadline
         ));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address recovered = _recover(digest, signature);
-        require(recovered == signer, "bad sig");
-        require(ethBalances[agentId] >= amount, "insufficient");
-        nonces[agentId] = nonce + 1;
-        ethBalances[agentId] -= amount;
+        require(recovered == s, "bad sig");
+        require(ethBalance >= amount, "insufficient");
+        nonce = n + 1;
+        ethBalance -= amount;
         (bool ok, ) = to.call{value: amount}("");
         require(ok, "transfer failed");
-        emit AgentPaid(agentId, to, amount);
+        emit AgentPaid(to, amount);
     }
 
     function delegatedPayERC20(
-        uint256 agentId,
         address token,
         address to,
         uint256 amount,
         uint256 deadline,
         bytes calldata signature
-    ) external notFrozen(agentId) nonReentrant {
+    ) external notFrozen nonReentrant {
         require(block.timestamp <= deadline, "expired");
-        address signer = agents[agentId].signer;
-        require(signer != address(0), "no signer");
-        uint256 nonce = nonces[agentId];
+        address s = signer;
+        require(s != address(0), "no signer");
+        uint256 n = nonce;
+        uint256 actualBal = IERC20(token).balanceOf(address(this));
+        if (actualBal > erc20Balances[token]) {
+            erc20Balances[token] = actualBal;
+        }
         bytes32 structHash = keccak256(abi.encode(
             PAY_ERC20_TYPEHASH,
-            agentId,
             token,
             to,
             amount,
-            nonce,
+            n,
             deadline
         ));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address recovered = _recover(digest, signature);
-        require(recovered == signer, "bad sig");
-        require(erc20Balances[agentId][token] >= amount, "insufficient");
-        nonces[agentId] = nonce + 1;
-        erc20Balances[agentId][token] -= amount;
+        require(recovered == s, "bad sig");
+        require(erc20Balances[token] >= amount, "insufficient");
+        nonce = n + 1;
+        erc20Balances[token] -= amount;
         ERC20Safe.safeTransfer(token, to, amount);
-        emit AgentPaidERC20(agentId, token, to, amount);
+        emit AgentPaidERC20(token, to, amount);
     }
 
-    function setServiceEndpoint(uint256 agentId, string calldata key, string calldata value) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        serviceEndpoints[agentId][key] = value;
-        bool exists = false;
-        for (uint256 i = 0; i < serviceKeys[agentId].length; i++) {
-            if (keccak256(bytes(serviceKeys[agentId][i])) == keccak256(bytes(key))) {
-                exists = true;
-                break;
-            }
-        }
-        if (!exists) {
-            require(serviceKeys[agentId].length < MAX_SERVICE_KEYS, "service keys limit");
-            serviceKeys[agentId].push(key);
-        }
-        emit ServiceEndpointSet(agentId, key, value);
-    }
-
-    function getServiceEndpoint(uint256 agentId, string calldata key) external view returns (string memory) {
-        return serviceEndpoints[agentId][key];
-    }
-
-    function getServiceKeys(uint256 agentId) external view returns (string[] memory) {
-        return serviceKeys[agentId];
-    }
-
-    function didOf(uint256 agentId) external view returns (string memory) {
-        require(agents[agentId].owner != address(0), "no agent");
+    function did() external view returns (string memory) {
+        require(owner != address(0), "no agent");
         string memory chainIdStr = _uint2str(block.chainid);
         string memory contractAddr = _addressToString(address(this));
-        string memory agentIdStr = _uint2str(agentId);
-        return string(abi.encodePacked("did:ethr:", chainIdStr, ":", contractAddr, ":", agentIdStr));
+        return string(abi.encodePacked("did:ethr:", chainIdStr, ":", contractAddr));
     }
 
     function delegatedExecute(
-        uint256 agentId,
         address target,
         uint256 value,
         bytes calldata data,
         uint256 deadline,
         bytes calldata signature
-    ) external notFrozen(agentId) nonReentrant {
+    ) external notFrozen nonReentrant {
         require(block.timestamp <= deadline, "expired");
-        address signer = agents[agentId].signer;
-        require(signer != address(0), "no signer");
+        address s = signer;
+        require(s != address(0), "no signer");
         require(target != address(this), "self-call blocked");
-        uint256 nonce = nonces[agentId];
+        uint256 n = nonce;
         bytes32 dataHash = keccak256(data);
         bytes32 structHash = keccak256(abi.encode(
             EXECUTE_TYPEHASH,
-            agentId,
             target,
             value,
             dataHash,
-            nonce,
+            n,
             deadline
         ));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address recovered = _recover(digest, signature);
-        require(recovered == signer, "bad sig");
+        require(recovered == s, "bad sig");
         if (value > 0) {
-            require(ethBalances[agentId] >= value, "insufficient");
-            ethBalances[agentId] -= value;
+            require(ethBalance >= value, "insufficient");
+            ethBalance -= value;
         }
-        nonces[agentId] = nonce + 1;
+        nonce = n + 1;
         (bool ok, ) = target.call{value: value}(data);
         require(ok, "exec failed");
-        emit DelegatedExecuted(agentId, target, value, data);
-    }
-
-    function disableAgentKey(uint256 agentId, bytes32 keyHash) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        AgentKey storage k = agents[agentId].agentKeys[keyHash];
-        k.enabled = false;
-        k.expireAt = 0;
-        emit AgentKeyDisabled(agentId, keyHash);
-    }
-
-    function removeServiceEndpoint(uint256 agentId, string calldata key) external onlyOwnerOf(agentId) notFrozen(agentId) {
-        serviceEndpoints[agentId][key] = "";
-        for (uint256 i = 0; i < serviceKeys[agentId].length; i++) {
-            if (keccak256(bytes(serviceKeys[agentId][i])) == keccak256(bytes(key))) {
-                serviceKeys[agentId][i] = serviceKeys[agentId][serviceKeys[agentId].length - 1];
-                serviceKeys[agentId].pop();
-                break;
-            }
-        }
-        emit ServiceEndpointSet(agentId, key, "");
+        emit DelegatedExecuted(target, value, data);
     }
 
     receive() external payable {
@@ -431,17 +266,13 @@ contract AetheriaAgentDID {
         revert("fallback disabled");
     }
 
-    function isFrozen(uint256 agentId) external view returns (bool) {
-        return frozen[agentId];
+    function isFrozen() external view returns (bool) {
+        return frozen;
     }
 
-    function getAuthorizedKey(uint256 agentId, bytes32 keyHash) external view returns (uint256 expireAt, uint256 permissions, bool enabled) {
-        AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
-        return (a.expireAt, a.permissions, a.enabled);
-    }
 
-    function getAgentSigner(uint256 agentId) external view returns (address) {
-        return agents[agentId].signer;
+    function getAgentSigner() external view returns (address) {
+        return signer;
     }
 
     function _uint2str(uint256 _i) internal pure returns (string memory _uintAsString) {
@@ -486,7 +317,6 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
 }
 
-// Internal safe ERC20 helpers to support tokens that return no boolean
 library ERC20Safe {
     function safeTransfer(address token, address to, uint256 amount) internal {
         bytes memory data = abi.encodeWithSelector(IERC20(token).transfer.selector, to, amount);
@@ -505,5 +335,4 @@ library ERC20Safe {
         }
     }
 }
-
 

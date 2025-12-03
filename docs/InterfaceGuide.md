@@ -1,234 +1,89 @@
-AetheriaAgentDID 接口大白话指南
+ AetheriaAgentDID 接口大白话指南（单 Agent 模型）
 
-目标
-- 给你的 AI Agent 在链上定一个身份证（agentId），并且能用这个身份做登录授权、收发钱、托管执行、暴露服务地址。
-- 管理后台负责“创建与管理身份、配置签名人和权限、维护服务端点、应急处理”。生态应用开发者负责“验证身份和权限、走委托签名流程完成授权与支付与执行”。
+ 目标
+ - 一个合约只代表一个 Agent：不再有 `agentId` 概念，合约地址就是身份根。
+- 支持登录认证（以 signer 为准）、收发钱、托管执行、应急冻结。
 
-接口分类总览（谁用它）
-- 管理后台（Owner 发起）
-  - `registerAgent(string)`（注册 Agent）
-  - `transferAgentOwnership(uint256,address)`（转移 Agent 所有权）
-  - `setAgentSigner(uint256,address)`（设置 Agent 签名人）
-  - `setAgentKey(uint256,bytes32,uint256)`（设置 Agent 主密钥）
-  - `disableAgentKey(uint256,bytes32)`（禁用 Agent 主密钥）
-  - `createAuthorizedKey(uint256,bytes32,uint256,uint256)`（创建访问令牌）
-  - `revokeAuthorizedKey(uint256,bytes32)`（吊销访问令牌）
-  - `updateMetadata(uint256,string)`（更新元数据）
-  - `freezeAgent(uint256)` / `unfreezeAgent(uint256)`（冻结 / 解冻 Agent）
-  - `depositToAgent(uint256)`（入金 ETH 至 Agent；可选，后台或任何人都能入金）
-  - `depositERC20(uint256,address,uint256)`（入金 ERC20 至 Agent；可选，后台或任何人都能入金）
-  - `setServiceEndpoint(uint256,string,string)`（设置服务端点）
-  - `removeServiceEndpoint(uint256,string)`（移除服务端点）
-- 生态应用（第三方/服务端/前端）
-  - `verifyAgentKey(uint256,bytes32)`（验证 Agent 主密钥）
-  - `verifyAuthorizedKey(uint256,bytes32,uint256)`（验证访问令牌权限）
-  - `delegatedCreateAuthorizedKey(...)`（委托创建访问令牌：云端签名 + 第三方上链）
-  - `delegatedPayEth(...)`（委托支付 ETH：云端签名）
-  - `delegatedPayERC20(...)`（委托支付 ERC20：云端签名）
-  - `delegatedExecute(...)`（委托通用合约调用：云端签名）
-  - `ownerOf(uint256)` / `getMetadata(uint256)` / `didOf(uint256)`（查询所有者 / 元数据 / DID）
-  - `getNonce(uint256)` / `balanceOf(uint256)` / `balanceOfERC20(uint256,address)` / `getServiceEndpoint(uint256,string)` / `getServiceKeys(uint256)` / `isFrozen(uint256)` / `getAuthorizedKey(uint256,bytes32)` / `getAgentSigner(uint256)`（查询随机数 / ETH余额 / ERC20余额 / 服务端点 / 服务键 / 冻结状态 / 授权令牌详情 / 签名人地址）
+ 接口分类总览（谁用它）
+ - 管理后台（Owner 发起）
+   - `transferAgentOwnership(address)`（转移 Agent 所有权）
+   - `setAgentSigner(address)`（设置 Agent 签名人）
+   - `updateMetadata(string)`（更新元数据）
+   - `freezeAgent()` / `unfreezeAgent()`（冻结 / 解冻 Agent）
+   - `depositToAgent()`（入金 ETH；任何人可入金）
+   - `depositERC20(address,uint256)`（入金 ERC20；任何人可入金）
+ - 生态应用（第三方/服务端/前端）
+   - `delegatedPayEth(address,uint256,uint256,bytes)`
+   - `delegatedPayERC20(address,address,uint256,uint256,bytes)`
+   - `delegatedExecute(address,uint256,bytes,uint256,bytes)`
+  - `ownerOf()` / `getMetadata()` / `did()`
+  - `getNonce()` / `balanceOf()` / `balanceOfERC20(address)` / `isFrozen()` / `getAgentSigner()`
 
-接口逻辑（大白话）
-- 身份与所有权
-  - `registerAgent(string metadataURI) returns (uint256)`（注册 Agent）
-    - 干啥：创建一个新的 Agent 身份，返回它的身份证号 `agentId`。
-    - 谁用：管理后台（用户点“一键创建身份”）。
-    - 要点：`metadataURI` 放 Agent 的基础资料（如邮箱公钥等）。
-    - 实现逻辑：递增 `nextAgentId`，写入 `agents[agentId].owner` 与 `metadataURI`，发出 `AgentRegistered` 事件。
-    - 案例说明：用户在后台点击“一键创建身份”，拿到 `agentId=1` 并记录到账户档案。
-  - `ownerOf(uint256 agentId) view returns (address)`（查询所有者）
-    - 干啥：查这个身份的主人是谁。
-    - 谁用：生态应用（校验所有权或显示信息）。
-    - 实现逻辑：直接返回 `agents[agentId].owner`。
-    - 案例说明：社交应用在用户资料卡展示该 Agent 的所有者地址。
-  - `transferAgentOwnership(uint256 agentId, address newOwner)`（转移 Agent 所有权）
-    - 干啥：把身份的主人换成新地址。
-    - 谁用：管理后台（所有权迁移）。
-    - 实现逻辑：校验 `newOwner!=0` 与未冻结，更新 `owner`，发出 `AgentOwnershipTransferred`。
-    - 案例说明：用户更换钱包，将 Agent 所有权转到新钱包地址。
-- 签名人与密钥
-  - `setAgentSigner(uint256 agentId, address signer)`（设置 Agent 签名人）
-    - 干啥：给 Agent 绑定“云端签名人”（运行在你服务器上的私钥对应地址）。
-    - 谁用：管理后台（配置云端签名能力）。
-    - 实现逻辑：写入 `agents[agentId].signer`，发出 `AgentSignerSet`。
-    - 案例说明：将云服务器上的签名密钥地址绑定到 Agent，用于后续委托操作。
-  - `setAgentKey(uint256 agentId, bytes32 keyHash, uint256 expireAt)`（设置 Agent 主密钥）
-    - 干啥：给 Agent 自己用的长期/可轮换密钥，像“主密钥”。
-    - 谁用：管理后台。
-    - 实现逻辑：要求 `keyHash!=0`，将对应 `AgentKey` 设置为启用并记录过期时间，事件 `AgentKeySet`。
-    - 案例说明：为 Agent 设置长期登录密钥以便链下签名与身份校验。
-  - `disableAgentKey(uint256 agentId, bytes32 keyHash)`（禁用 Agent 主密钥）
-    - 干啥：把某个主密钥禁用，方便轮换或紧急撤销。
-    - 谁用：管理后台。
-    - 实现逻辑：将 `enabled=false` 且 `expireAt=0`，事件 `AgentKeyDisabled`。
-    - 案例说明：发现主密钥泄露，立即禁用并设置新密钥。
-  - `createAuthorizedKey(uint256 agentId, bytes32 keyHash, uint256 expireAt, uint256 permissions)`（创建访问令牌）
-    - 干啥：给外部应用发的“访问令牌”，带权限位（比如 读=1，写=2，发消息=4）。
-    - 谁用：管理后台（Agent 主动授权某应用）。
-    - 实现逻辑：要求 `keyHash!=0`，写入 `AuthorizedKey{enabled=true, expireAt, permissions}`，事件 `AuthorizedKeyCreated`。
-    - 案例说明：为邮箱服务发放只读消息权限的访问令牌。
-  - `revokeAuthorizedKey(uint256 agentId, bytes32 keyHash)`（吊销访问令牌）
-    - 干啥：撤销某个访问令牌。
-    - 谁用：管理后台（吊销权限）。
-    - 实现逻辑：将令牌 `enabled=false`，清空 `expireAt` 与 `permissions`，事件 `AuthorizedKeyRevoked`。
-    - 案例说明：结束与某第三方应用的合作，吊销它的访问令牌。
-- 验证与登录
-  - `verifyAgentKey(uint256 agentId, bytes32 keyHash) view returns (bool)`（验证 Agent 主密钥）
-    - 干啥：检查 Agent 的主密钥是否可用且未过期。
-    - 谁用：生态应用（校验 Agent 自身身份）。
-    - 实现逻辑：校验 `owner` 存在、未冻结、`enabled==true`、未过期且哈希匹配。
-    - 案例说明：登录页面校验 Agent 自身身份是否有效。
-  - `verifyAuthorizedKey(uint256 agentId, bytes32 keyHash, uint256 requiredPermissions) view returns (bool)`（验证访问令牌权限）
-    - 干啥：检查访问令牌是否有效、未过期、且权限位满足需求。
-    - 谁用：生态应用（登录与权限校验）。
-    - 实现逻辑：在有效性与未过期基础上校验 `(stored & required) == required`。
-    - 案例说明：社交应用检查是否具备“发帖 + 读消息”的组合权限。
-- 委托（云端签+第三方上链）
-  - `delegatedCreateAuthorizedKey(uint256 agentId, bytes32 keyHash, uint256 expireAt, uint256 permissions, uint256 deadline, bytes signature)`（委托创建访问令牌）
-    - 干啥：Agent 云端用 `signer` 私钥签好“创建授权”的 EIP-712 数据，第三方（或前端）拿签名上链，合约验签后创建访问令牌。
-    - 谁用：生态应用或管理后台的服务端（免 Owner 亲自发交易）。
-    - 实现逻辑：校验 `deadline`、`recovered==signer`、`nonce` 自增，写入令牌并发事件。
-    - 案例说明：Agent 在云端批准某应用的访问，前端将签名提交链上。
-  - `getNonce(uint256 agentId) view returns (uint256)`（查询随机数）
-    - 干啥：拿当前 nonce，防止签名被复用。
-    - 谁用：签名前必须先查。
-    - 实现逻辑：返回 `nonces[agentId]`；每次委托成功后自增。
-    - 案例说明：前端构造 EIP-712 数据前先读取最新 nonce。
-- 资金与支付
-  - `depositToAgent(uint256 agentId)` payable（入金 ETH 至 Agent）
-    - 干啥：给这个 Agent 的链上资金池充 ETH。
-    - 谁用：任何人（管理后台常用）。
-    - 实现逻辑：校验 `owner` 存在与 `msg.value>0`，累加 `ethBalances[agentId]` 并发 `AgentDeposited`。
-    - 案例说明：主人给 Agent 预充 1 ETH 用于日常开销。
-  - `balanceOf(uint256 agentId) view returns (uint256)`（查询 ETH 余额）
-    - 干啥：查 Agent 的 ETH 余额（存在合约里）。
-    - 谁用：生态应用或后台显示。
-    - 实现逻辑：返回 `ethBalances[agentId]`。
-    - 案例说明：后台显示 Agent 当前余额供用户参考。
-  - `delegatedPayEth(uint256 agentId, address to, uint256 amount, uint256 deadline, bytes signature)`（委托支付 ETH）
-    - 干啥：Agent 云端签好“付钱”指令，第三方上链，合约从该 Agent 的余额转 ETH 给 `to`。
-    - 谁用：生态应用服务端（结算与消费）。
-    - 实现逻辑：校验签名/截止时间/nonce 与余额充足，扣减余额并安全转账，事件 `AgentPaid`。
-    - 案例说明：Agent 支付云存储服务的月费给服务商地址。
-  - `depositERC20(uint256 agentId, address token, uint256 amount)`（入金 ERC20 至 Agent）
-    - 干啥：给 Agent 的代币池充 ERC20（先 `approve` 合约）。
-    - 谁用：任何人（管理后台常用）。
-    - 实现逻辑：使用安全封装 `safeTransferFrom` 将代币转入合约并累计 `erc20Balances[agentId][token]`，事件 `AgentDepositedERC20`。
-    - 案例说明：为 Agent 充值 10 USDC 用于订阅费用。
-  - `balanceOfERC20(uint256 agentId, address token) view returns (uint256)`（查询 ERC20 余额）
-    - 干啥：查 Agent 的某个代币余额（存在合约里）。
-    - 谁用：生态应用或后台显示。
-    - 实现逻辑：返回 `erc20Balances[agentId][token]`。
-    - 案例说明：前端显示 Agent 的 USDC 余额。
-  - `delegatedPayERC20(uint256 agentId, address token, address to, uint256 amount, uint256 deadline, bytes signature)`（委托支付 ERC20）
-    - 干啥：Agent 云端签好“付代币”指令，第三方上链，合约从该 Agent 的代币余额转给 `to`。
-    - 谁用：生态应用服务端。
-    - 实现逻辑：校验签名/截止时间/nonce 与代币余额充足，扣减余额并安全 `transfer`，事件 `AgentPaidERC20`。
-    - 案例说明：Agent 用 USDC 支付 SaaS 订阅。
-- 元数据与服务端点
-  - `updateMetadata(uint256 agentId, string metadataURI)`（更新元数据）
-    - 干啥：更新 Agent 的元数据（比如邮箱公钥、资料存储地址）。
-    - 谁用：管理后台。
-    - 实现逻辑：更新 `metadataURI` 并发 `MetadataUpdated`。
-    - 案例说明：替换为新的邮箱公钥或资料 IPFS 链接。
-  - `setServiceEndpoint(uint256 agentId, string key, string value)`（设置服务端点）
-    - 干啥：注册标准化服务地址（比如 `email` → `mailto:...`，`social` → `https://...`）。
-    - 谁用：管理后台。
-    - 实现逻辑：写入 `serviceEndpoints`，维护 `serviceKeys` 唯一键列表，事件 `ServiceEndpointSet`。
-    - 案例说明：登记 `email -> mailto:agent@aetheria.ai` 与 `social -> https://x.com/agent`。
-  - `removeServiceEndpoint(uint256 agentId, string key)`（移除服务端点）
-    - 干啥：删除某服务地址并维护键列表（不再对外暴露）。
-    - 谁用：管理后台。
-    - 实现逻辑：清空对应 `value` 并从 `serviceKeys` 列表移除该键，事件 `ServiceEndpointSet(agentId, key, "")`。
-    - 案例说明：下线不再使用的 webhook 端点。
-  - `getServiceEndpoint(uint256 agentId, string key) view returns (string)`（查询服务端点）
-    - 干啥：查某服务地址。
-    - 谁用：生态应用或任何前端。
-    - 实现逻辑：读取 `serviceEndpoints[agentId][key]`。
-    - 案例说明：邮件系统读取 `email` 端点地址用于投递。
-  - `getServiceKeys(uint256 agentId) view returns (string[])`（查询服务键列表）
-    - 干啥：列出已注册的服务键名。
-    - 谁用：生态应用或任何前端。
-    - 实现逻辑：返回 `serviceKeys[agentId]`。
-    - 案例说明：前端渲染所有可用服务类型供选择。
-- DID 标识与应急
-  - `didOf(uint256 agentId) view returns (string)`（查询统一 DID 标识）
-    - 干啥：拿统一 DID 字符串：`did:ethr:<chainId>:<contract>:<agentId>`。
-    - 谁用：生态应用（快速接入与展示）。
-    - 实现逻辑：以链上 `chainId`、合约地址与 `agentId` 拼接生成 DID。
-    - 案例说明：外部系统直接用该 DID 作为用户唯一标识。
-  - `isFrozen(uint256 agentId)` / `getAuthorizedKey(uint256,bytes32)` / `getAgentSigner(uint256)`（查询冻结状态 / 授权令牌详情 / 签名人地址）
-    - 干啥：查询冻结状态、授权 key 详情、当前签名人地址。
-    - 谁用：生态应用或前端显示、路由策略。
-    - 实现逻辑：读取 `frozen[agentId]`、返回 `AuthorizedKey(expireAt,permissions,enabled)`、返回 `agents[agentId].signer`。
-    - 案例说明：前端显示 Agent 冻结状态并提示用户先解冻。
-  - `freezeAgent(uint256 agentId)` / `unfreezeAgent(uint256 agentId)`（冻结 / 解冻 Agent）
-    - 干啥：紧急冻结/解冻。被冻结后所有验证与委托操作都会失败。
-    - 谁用：管理后台（应急止损）。
-    - 实现逻辑：设置 `frozen[agentId]=true/false` 并发 `AgentFrozen`/`AgentUnfrozen`。
-    - 案例说明：检测到异常授权，管理员立即冻结，排查后再解冻。
-- 通用委托执行（为 AA / UserOp 打基础）
-  - `delegatedExecute(uint256 agentId, address target, uint256 value, bytes data, uint256 deadline, bytes signature)`（委托通用合约执行）
-    - 干啥：Agent 云端签任意调用（含可选 ETH `value`），第三方上链，合约扣 Agent 余额后调用目标合约。
-    - 谁用：生态应用服务端；后续能平滑迁移到 ERC-4337 账户抽象。
-    - 实现逻辑：校验签名/截止时间/nonce，若 `value>0` 扣减 ETH 余额，`target.call{value}(data)` 执行并发 `DelegatedExecuted`。
-    - 案例说明：Agent 托管执行“更新个人资料”或与其他协议交互（如发布链上消息）。
+ 接口逻辑（大白话）
+ - 身份与所有权（单 Agent）
+   - 构造函数：`constructor(address owner, address signer, string metadataURI)`
+     - 由 Factory 或直接部署，初始化 `owner`、`metadataURI`，可选绑定 `signer`。
+     - 事件：`AgentInitialized(owner, metadataURI)` 与可选 `AgentSignerSet(signer)`。
+   - `ownerOf()`：查询该合约代表的 Agent 的所有者地址。
+   - `transferAgentOwnership(address)`：校验 `newOwner!=0` 与未冻结，更新 `owner`，事件 `AgentOwnershipTransferred`。
 
-典型使用流程
-- 创建身份
-  - 后台调用 `registerAgent` → 拿到 `agentId` → 配置 `setAgentSigner` → 可选设置 `setAgentKey`。
-- 登录授权
-  - 后台创建 `createAuthorizedKey` 或走 `delegatedCreateAuthorizedKey`（云端签名）→ 外部应用用 `verifyAuthorizedKey` 校验登录与权限。
-- 支付结算
-  - 入金 `depositToAgent` / `depositERC20` → 云端签名支付（`delegatedPayEth`/`delegatedPayERC20`）。
-- 服务发现
-  - 后台 `setServiceEndpoint` → 前端/应用 `getServiceEndpoint` 与 `getServiceKeys` → 用 `didOf` 显示统一 DID。
-- 应急
-  - 后台 `freezeAgent` 立即阻断所有验证与委托；恢复用 `unfreezeAgent`。
+ - 签名人与认证
+   - `setAgentSigner(address)`：写入 `signer`，事件 `AgentSignerSet`。
+   - 认证统一以 `signer` 进行 EIP-712 验证，不再提供授权令牌接口。
 
-生态开发注意点
-- 校验权限位：`(stored & required) == required`，按位组合权限。
-- 所有委托都要先查 `getNonce(agentId)`，并设置合理 `deadline`。
-- 冻结后所有校验/委托都会失败，注意前端提示与重试策略。
-- 代币入金要先 `approve` 合约，再 `depositERC20`。
+ - 委托（云端签+第三方上链）
+   - `delegatedPayEth` / `delegatedPayERC20` / `delegatedExecute`：云端用 `signer` 私钥签 EIP-712，第三方/Relayer 上链；成功后 `nonce` 自增。
+   - `getNonce()`：查询当前随机数，防重放。
 
-业务流程图（一图懂全局）
-参见 `docs/ArchitectureFlow.md`，包含 Mermaid 与 ASCII 两种版本的流程图，适配不支持图片的环境。
+ - 资金与支付
+   - `depositToAgent()`：给 Agent 资金池充 ETH；事件 `AgentDeposited`。
+   - `balanceOf()`：查询 ETH 余额。
+   - `delegatedPayEth(address,uint256,uint256,bytes)`：委托支付 ETH；事件 `AgentPaid`。
+   - `depositERC20(address,uint256)`：入金 ERC20（先 `approve`）；事件 `AgentDepositedERC20`。
+   - `balanceOfERC20(address)`：查询 ERC20 余额。
+   - `delegatedPayERC20(address,address,uint256,uint256,bytes)`：委托支付 ERC20；事件 `AgentPaidERC20`。
 
-案例加餐
-- OAuth 登录替代：网站端展示“用 Agent 身份登录”，后台生成 `requiredPermissions`，用户云端签名授权，网站用 `verifyAuthorizedKey` 校验通过后创建会话。
-- 电话短信机器人：将 `serviceEndpoint` 注册为 `tel:+...` 或 webhook；第三方服务按约定推送，应用先用 `verifyAuthorizedKey` 校验权限，再投递消息。
-- 多商户结算：Agent 为每个商户生成不同 `authorizedKey`，订单支付走 `delegatedPayERC20`；商户侧监听事件入账并对账。
-- 安全审计与风控：前端始终显示 `isFrozen`，异常时后台触发 `freezeAgent`；恢复后 `unfreezeAgent` 并轮换关键密钥 `disableAgentKey` + `setAgentKey`。
+- 元数据
+  - `updateMetadata(string)`：更新元数据；事件 `MetadataUpdated`。
 
-中英对照表（函数名翻译）
-- 注册 Agent：`registerAgent`
-- 查询所有者：`ownerOf`
-- 转移 Agent 所有权：`transferAgentOwnership`
-- 设置 Agent 签名人：`setAgentSigner`
-- 设置 Agent 主密钥：`setAgentKey`
-- 禁用 Agent 主密钥：`disableAgentKey`
-- 创建访问令牌：`createAuthorizedKey`
-- 吊销访问令牌：`revokeAuthorizedKey`
-- 验证 Agent 主密钥：`verifyAgentKey`
-- 验证访问令牌权限：`verifyAuthorizedKey`
-- 委托创建访问令牌：`delegatedCreateAuthorizedKey`
-- 查询随机数：`getNonce`
-- 入金 ETH 至 Agent：`depositToAgent`
-- 查询 ETH 余额：`balanceOf`
-- 委托支付 ETH：`delegatedPayEth`
-- 入金 ERC20 至 Agent：`depositERC20`
-- 查询 ERC20 余额：`balanceOfERC20`
-- 委托支付 ERC20：`delegatedPayERC20`
-- 更新元数据：`updateMetadata`
-- 设置服务端点：`setServiceEndpoint`
-- 移除服务端点：`removeServiceEndpoint`
-- 查询服务端点：`getServiceEndpoint`
-- 查询服务键列表：`getServiceKeys`
-- 查询统一 DID 标识：`didOf`
-- 查询冻结状态：`isFrozen`
-- 查询授权令牌详情：`getAuthorizedKey`
-- 查询签名人地址：`getAgentSigner`
-- 冻结 / 解冻 Agent：`freezeAgent` / `unfreezeAgent`
-- 委托通用合约执行：`delegatedExecute`
+ - DID 与应急
+   - `did()`：返回 `did:ethr:<chainId>:<contract>`。
+   - `isFrozen()`：查询冻结状态。
+   - `freezeAgent()` / `unfreezeAgent()`：冻结 / 解冻；冻结时所有验证与委托失败。
+
+ - 通用委托执行（AA 友好）
+   - `delegatedExecute(address,uint256,bytes,uint256,bytes)`：云端签名任意调用（含可选 ETH `value`），第三方上链；成功事件 `DelegatedExecuted`。
+
+ 反事实部署（Factory 扩展）
+ - `computeAddress(owner, signer, metadataURI, salt)`：预计算合约地址，可立即收款（未部署）。
+ - `deployAgent(owner, signer, metadataURI, salt)`：确定性部署。
+ - 组合交易：`deployAndDelegatedPayERC20/PayEth/Execute` 首次使用“一笔完成部署与执行”。
+
+ 典型使用流程
+ - 初始化身份：Factory 预计算地址 → 入金 → 首次使用自动部署；或直接部署构造。
+ - 登录与支付：云端 `signer` EIP-712 签名 → 第三方上链支付/执行。
+  
+ - 应急：后台 `freezeAgent` 阻断所有委托；恢复用 `unfreezeAgent`。
+
+ 生态开发注意点
+ - 所有委托先查 `getNonce()`，并设置合理 `deadline`。
+ - 冻结后所有委托失败，注意前端提示与重试策略。
+ - 代币入金要先 `approve` 合约，再 `depositERC20`；若走反事实部署，可先直接转到预计算地址。
+
+ 中英对照表（函数名翻译）
+ - 查询所有者：`ownerOf`
+ - 转移所有权：`transferAgentOwnership`
+ - 设置签名人：`setAgentSigner`
+ - 查询随机数：`getNonce`
+ - 入金 ETH：`depositToAgent`
+ - 查询 ETH 余额：`balanceOf`
+ - 委托支付 ETH：`delegatedPayEth`
+ - 入金 ERC20：`depositERC20`
+ - 查询 ERC20 余额：`balanceOfERC20`
+ - 委托支付 ERC20：`delegatedPayERC20`
+ - 更新元数据：`updateMetadata`
+ - 查询统一 DID 标识：`did`
+ - 查询冻结状态：`isFrozen`
+ - 查询签名人地址：`getAgentSigner`
+ - 冻结 / 解冻：`freezeAgent` / `unfreezeAgent`
+ - 委托通用合约执行：`delegatedExecute`
