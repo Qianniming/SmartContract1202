@@ -6,7 +6,7 @@ from eth_account.messages import encode_structured_data
 from eth_utils import keccak, to_checksum_address
 
 ABI: List[Any] = [
-    {"type":"function","name":"registerAgent","stateMutability":"nonpayable","inputs":[{"name":"metadataURI","type":"string"}],"outputs":[{"name":"","type":"uint256"}]},
+    {"type":"function","name":"registerAgent","stateMutability":"nonpayable","inputs":[{"name":"metadataURI","type":"string"},{"name":"signer","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
     {"type":"function","name":"ownerOf","stateMutability":"view","inputs":[{"name":"","type":"uint256"}],"outputs":[{"name":"","type":"address"}]},
     {"type":"function","name":"setAgentSigner","stateMutability":"nonpayable","inputs":[{"name":"agentId","type":"uint256"},{"name":"signer","type":"address"}],"outputs":[]},
     {"type":"function","name":"transferAgentOwnership","stateMutability":"nonpayable","inputs":[{"name":"agentId","type":"uint256"},{"name":"newOwner","type":"address"}],"outputs":[]},
@@ -114,8 +114,8 @@ class AIEP:
         return self.w3.eth.wait_for_transaction_receipt(tx_hash)
 
     # --- identity & config ---
-    def register_agent(self, metadata_uri: str, private_key: str):
-        func = self.contract.functions.registerAgent(metadata_uri)
+    def register_agent(self, metadata_uri: str, private_key: str, signer: str = "0x0000000000000000000000000000000000000000"):
+        func = self.contract.functions.registerAgent(metadata_uri, to_checksum_address(signer))
         return self._transact(func, private_key)
 
     def owner_of(self, agent_id: int):
@@ -243,4 +243,3 @@ class AIEP:
         sig = self._sign_typed("Execute", value, private_key)
         func = self.contract.functions.delegatedExecute(agent_id, to_checksum_address(target), value_wei, data, deadline, sig)
         return self._transact(func, private_key)
-

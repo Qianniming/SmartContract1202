@@ -12,10 +12,9 @@ async function main() {
   const aiepOwner = new AIEP(owner, contractAddress);
   const aiepProvider = new AIEP(provider, contractAddress);
 
-  const regTx = await aiepOwner.registerAgent("ipfs://meta");
+  const regTx = await aiepOwner.registerAgent("ipfs://meta", await signer.getAddress());
   const regRc = await regTx.wait();
   const agentId = 1n;
-  await aiepOwner.setAgentSigner(agentId, await signer.getAddress());
   const key = ethers.keccak256(ethers.toUtf8Bytes("auth-key"));
   await aiepOwner.createAuthorizedKey(agentId, key, 0, Permissions.READ | Permissions.WRITE);
   const ok = await aiepProvider.verifyAuthorizedKey(agentId, key, Permissions.READ);

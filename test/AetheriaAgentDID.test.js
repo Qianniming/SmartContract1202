@@ -6,19 +6,19 @@ describe("AetheriaAgentDID", function () {
   beforeEach(async function () {
     [owner, other, signer] = await ethers.getSigners();
     AetheriaAgentDID = await ethers.getContractFactory("AetheriaAgentDID");
-    did = await AetheriaAgentDID.deploy();
+    did = await AetheriaAgentDID.deploy("", ethers.ZeroAddress);
     await did.waitForDeployment();
   });
 
   it("register and owner", async function () {
-    await did.registerAgent("ipfs://meta1");
+    await did.registerAgent("ipfs://meta1", ethers.ZeroAddress);
     const agentId = 1n;
     expect(await did.ownerOf(agentId)).to.eq(owner.address);
     expect(await did.getMetadata(agentId)).to.eq("ipfs://meta1");
   });
 
   it("set agent key and verify", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const key = ethers.keccak256(ethers.toUtf8Bytes("agent-key"));
     await did.setAgentKey(id, key, 0);
@@ -26,7 +26,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("agent key expire", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const key = ethers.keccak256(ethers.toUtf8Bytes("agent-key"));
     const now = (await ethers.provider.getBlock("latest")).timestamp;
@@ -38,7 +38,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("authorized key create/verify/revoke", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const k = ethers.keccak256(ethers.toUtf8Bytes("auth-key"));
     const perms = 0b1011;
@@ -50,7 +50,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("authorized key expire boundary", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const k = ethers.keccak256(ethers.toUtf8Bytes("auth-key"));
     const now = (await ethers.provider.getBlock("latest")).timestamp;
@@ -62,7 +62,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("freeze and unfreeze", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const k = ethers.keccak256(ethers.toUtf8Bytes("auth-key"));
     await did.createAuthorizedKey(id, k, 0, 0b11);
@@ -73,7 +73,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("ownership transfer", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     await did.transferAgentOwnership(id, other.address);
     expect(await did.ownerOf(id)).to.eq(other.address);
@@ -83,7 +83,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("delegated create authorized key (EIP-712)", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     await did.setAgentSigner(id, signer.address);
     const chainId = (await ethers.provider.getNetwork()).chainId;
@@ -115,7 +115,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("deposit and delegated pay eth", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     await did.depositToAgent(id, { value: ethers.parseEther("1") });
     expect(await did.balanceOf(id)).to.eq(ethers.parseEther("1"));
@@ -149,7 +149,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("ERC20 deposit and delegated pay", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const token = await MockERC20.deploy();
@@ -190,7 +190,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("DID string and service endpoints", async function () {
-    await did.registerAgent("ipfs://meta");
+    await did.registerAgent("ipfs://meta", ethers.ZeroAddress);
     const id = 1n;
     const chainId = (await ethers.provider.getNetwork()).chainId;
     const expected = `did:ethr:${chainId}:${(await did.getAddress()).toLowerCase()}:${Number(id)}`;
@@ -204,7 +204,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("delegated execute generic call", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const MockTarget = await ethers.getContractFactory("MockTarget");
     const target = await MockTarget.deploy();
@@ -239,7 +239,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("ERC20 fee-on-transfer deposit accounts received amount", async function () {
-    await did.registerAgent("m");
+    await did.registerAgent("m", ethers.ZeroAddress);
     const id = 1n;
     const MockFeeToken = await ethers.getContractFactory("MockFeeToken");
     const feeToken = await MockFeeToken.deploy();
@@ -252,7 +252,7 @@ describe("AetheriaAgentDID", function () {
   });
 
   it("service keys length is limited", async function () {
-    await did.registerAgent("meta");
+    await did.registerAgent("meta", ethers.ZeroAddress);
     const id = 1n;
     for (let i = 0; i < 50; i++) {
       await did.setServiceEndpoint(id, `k${i}`, `v${i}`);

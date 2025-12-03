@@ -10,8 +10,8 @@ contract AetheriaAgentDID {
 
     struct AuthorizedKey {
         bytes32 keyHash;
-        uint256 expireAt;
-        uint256 permissions;
+        uint64 expireAt;
+        uint128 permissions;
         bool enabled;
     }
 
@@ -78,10 +78,27 @@ contract AetheriaAgentDID {
         reentrancyLock = 0;
     }
 
-    function registerAgent(string calldata metadataURI) external returns (uint256 agentId) {
+    constructor(string memory metadataURI, address signer) {
+        if (bytes(metadataURI).length != 0 || signer != address(0)) {
+            uint256 agentId = nextAgentId++;
+            agents[agentId].owner = msg.sender;
+            agents[agentId].metadataURI = metadataURI;
+            if (signer != address(0)) {
+                agents[agentId].signer = signer;
+                emit AgentSignerSet(agentId, signer);
+            }
+            emit AgentRegistered(agentId, msg.sender, metadataURI);
+        }
+    }
+
+    function registerAgent(string calldata metadataURI, address signer) external returns (uint256 agentId) {
         agentId = nextAgentId++;
         agents[agentId].owner = msg.sender;
         agents[agentId].metadataURI = metadataURI;
+        if (signer != address(0)) {
+            agents[agentId].signer = signer;
+            emit AgentSignerSet(agentId, signer);
+        }
         emit AgentRegistered(agentId, msg.sender, metadataURI);
     }
 
@@ -114,8 +131,10 @@ contract AetheriaAgentDID {
         require(keyHash != bytes32(0), "bad key");
         AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
         a.keyHash = keyHash;
-        a.expireAt = expireAt;
-        a.permissions = permissions;
+        require(expireAt <= type(uint64).max, "expireAt overflow");
+        require(permissions <= type(uint128).max, "permissions overflow");
+        a.expireAt = uint64(expireAt);
+        a.permissions = uint128(permissions);
         a.enabled = true;
         emit AuthorizedKeyCreated(agentId, keyHash, expireAt, permissions, true);
     }
@@ -147,8 +166,10 @@ contract AetheriaAgentDID {
         nonces[agentId] = nonce + 1;
         AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
         a.keyHash = keyHash;
-        a.expireAt = expireAt;
-        a.permissions = permissions;
+        require(expireAt <= type(uint64).max, "expireAt overflow");
+        require(permissions <= type(uint128).max, "permissions overflow");
+        a.expireAt = uint64(expireAt);
+        a.permissions = uint128(permissions);
         a.enabled = true;
         emit DelegatedAuthorizedKeyCreated(agentId, keyHash, expireAt, permissions);
     }
@@ -176,7 +197,7 @@ contract AetheriaAgentDID {
         AuthorizedKey storage a = agents[agentId].authorizedKeys[keyHash];
         if (!a.enabled) return false;
         if (a.expireAt != 0 && block.timestamp > a.expireAt) return false;
-        if ((a.permissions & requiredPermissions) != requiredPermissions) return false;
+        if ((uint256(a.permissions) & requiredPermissions) != requiredPermissions) return false;
         return a.keyHash == keyHash;
     }
 

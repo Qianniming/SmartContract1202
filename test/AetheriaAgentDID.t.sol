@@ -17,24 +17,30 @@ contract AetheriaAgentDIDTest {
     AetheriaAgentDID did;
 
     function setUp() public {
-        did = new AetheriaAgentDID();
+        did = new AetheriaAgentDID("", address(0));
     }
 
     function testRegisterAndOwner() public {
-        uint256 id = did.registerAgent("ipfs://meta1");
+        uint256 id = did.registerAgent("ipfs://meta1", address(0));
         _assertEqAddress(did.ownerOf(id), address(this));
         _assertEqString(did.getMetadata(id), "ipfs://meta1");
     }
 
+    function testRegisterWithSigner() public {
+        address s = address(0x123);
+        uint256 id = did.registerAgent("ipfs://meta2", s);
+        _assertEqAddress(did.getAgentSigner(id), s);
+    }
+
     function testSetAgentKeyAndVerify() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         bytes32 key = keccak256("agent-key");
         did.setAgentKey(id, key, 0);
         _assertTrue(did.verifyAgentKey(id, key));
     }
 
     function testAgentKeyExpire() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         bytes32 key = keccak256("agent-key");
         did.setAgentKey(id, key, block.timestamp + 10);
         _assertTrue(did.verifyAgentKey(id, key));
@@ -43,7 +49,7 @@ contract AetheriaAgentDIDTest {
     }
 
     function testAuthorizedKeyCreateVerifyRevoke() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         bytes32 k = keccak256("auth-key");
         uint256 perms = 0b1011; // example bits
         did.createAuthorizedKey(id, k, 0, perms);
@@ -54,7 +60,7 @@ contract AetheriaAgentDIDTest {
     }
 
     function testAuthorizedKeyExpireBoundary() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         bytes32 k = keccak256("auth-key");
         did.createAuthorizedKey(id, k, block.timestamp + 5, 0b111);
         _assertTrue(did.verifyAuthorizedKey(id, k, 0b001));
@@ -63,7 +69,7 @@ contract AetheriaAgentDIDTest {
     }
 
     function testFreezeUnfreeze() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         bytes32 k = keccak256("auth-key");
         did.createAuthorizedKey(id, k, 0, 0b11);
         did.freezeAgent(id);
@@ -73,7 +79,7 @@ contract AetheriaAgentDIDTest {
     }
 
     function testOwnershipTransfer() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         address newOwner = address(0xBEEF);
         did.transferAgentOwnership(id, newOwner);
         _assertEqAddress(did.ownerOf(id), newOwner);
@@ -83,7 +89,7 @@ contract AetheriaAgentDIDTest {
     }
 
     function testDelegatedCreateAuthorizedKey() public {
-        uint256 id = did.registerAgent("m");
+        uint256 id = did.registerAgent("m", address(0));
         uint256 signerPk = 0xA11CE;
         address signer = vm.addr(signerPk);
         did.setAgentSigner(id, signer);

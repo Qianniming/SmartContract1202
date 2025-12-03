@@ -39,7 +39,7 @@ const Types = {
 };
 
 const ABI = [
-  "function registerAgent(string metadataURI) returns (uint256)",
+  "function registerAgent(string metadataURI, address signer) returns (uint256)",
   "function ownerOf(uint256) view returns (address)",
   "function setAgentSigner(uint256,address)",
   "function transferAgentOwnership(uint256,address)",
@@ -75,7 +75,7 @@ class AIEP {
     this.address = address;
     this.contract = new ethers.Contract(address, ABI, providerOrSigner);
   }
-  async registerAgent(metadataURI) { return await this.contract.registerAgent(metadataURI); }
+  async registerAgent(metadataURI, signer = "0x0000000000000000000000000000000000000000") { return await this.contract.registerAgent(metadataURI, signer); }
   async ownerOf(agentId) { return await this.contract.ownerOf(agentId); }
   async setAgentSigner(agentId, signer) { return await this.contract.setAgentSigner(agentId, signer); }
   async transferAgentOwnership(agentId, to) { return await this.contract.transferAgentOwnership(agentId, to); }
