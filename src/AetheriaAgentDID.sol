@@ -12,8 +12,6 @@ contract AetheriaAgentDID {
 
     bool private frozen;
     uint256 private nonce;
-    uint256 private ethBalance;
-    mapping(address => uint256) private erc20Balances;
     uint256 private reentrancyLock;
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -57,7 +55,6 @@ contract AetheriaAgentDID {
         require(_owner != address(0), "owner cannot be zero");
         owner = _owner;
         metadataURI = _metadataURI;
-        ethBalance = address(this).balance;
         if (_signer != address(0)) {
             signer = _signer;
             emit AgentSignerSet(_signer);
@@ -106,17 +103,16 @@ contract AetheriaAgentDID {
     }
 
     function balanceOf() external view returns (uint256) {
-        return ethBalance;
+        return address(this).balance;
     }
 
     function balanceOfERC20(address token) external view returns (uint256) {
-        return erc20Balances[token];
+        return IERC20(token).balanceOf(address(this));
     }
 
     function depositToAgent() external payable notFrozen {
         require(owner != address(0), "no agent");
         require(msg.value > 0, "no value");
-        ethBalance += msg.value;
         emit AgentDeposited(msg.sender, msg.value);
     }
 
@@ -127,7 +123,6 @@ contract AetheriaAgentDID {
         ERC20Safe.safeTransferFrom(token, msg.sender, address(this), amount);
         uint256 balAfter = IERC20(token).balanceOf(address(this));
         uint256 received = balAfter - balBefore;
-        erc20Balances[token] += received;
         emit AgentDepositedERC20(token, msg.sender, received);
     }
 
@@ -176,9 +171,8 @@ contract AetheriaAgentDID {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address recovered = _recover(digest, signature);
         require(recovered == s, "bad sig");
-        require(ethBalance >= amount, "insufficient");
+        require(address(this).balance >= amount, "insufficient");
         nonce = n + 1;
-        ethBalance -= amount;
         (bool ok, ) = to.call{value: amount}("");
         require(ok, "transfer failed");
         emit AgentPaid(to, amount);
@@ -195,10 +189,6 @@ contract AetheriaAgentDID {
         address s = signer;
         require(s != address(0), "no signer");
         uint256 n = nonce;
-        uint256 actualBal = IERC20(token).balanceOf(address(this));
-        if (actualBal > erc20Balances[token]) {
-            erc20Balances[token] = actualBal;
-        }
         bytes32 structHash = keccak256(abi.encode(
             PAY_ERC20_TYPEHASH,
             token,
@@ -210,9 +200,8 @@ contract AetheriaAgentDID {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         address recovered = _recover(digest, signature);
         require(recovered == s, "bad sig");
-        require(erc20Balances[token] >= amount, "insufficient");
+        require(IERC20(token).balanceOf(address(this)) >= amount, "insufficient");
         nonce = n + 1;
-        erc20Balances[token] -= amount;
         ERC20Safe.safeTransfer(token, to, amount);
         emit AgentPaidERC20(token, to, amount);
     }
@@ -249,8 +238,7 @@ contract AetheriaAgentDID {
         address recovered = _recover(digest, signature);
         require(recovered == s, "bad sig");
         if (value > 0) {
-            require(ethBalance >= value, "insufficient");
-            ethBalance -= value;
+            require(address(this).balance >= value, "insufficient");
         }
         nonce = n + 1;
         (bool ok, ) = target.call{value: value}(data);
@@ -259,11 +247,11 @@ contract AetheriaAgentDID {
     }
 
     receive() external payable {
-        revert("direct eth not allowed");
+        emit AgentDeposited(msg.sender, msg.value);
     }
 
     fallback() external payable {
-        revert("fallback disabled");
+        emit AgentDeposited(msg.sender, msg.value);
     }
 
     function isFrozen() external view returns (bool) {

@@ -35,13 +35,14 @@
    - `delegatedPayEth` / `delegatedPayERC20` / `delegatedExecute`：云端用 `signer` 私钥签 EIP-712，第三方/Relayer 上链；成功后 `nonce` 自增。
    - `getNonce()`：查询当前随机数，防重放。
 
- - 资金与支付
-   - `depositToAgent()`：给 Agent 资金池充 ETH；事件 `AgentDeposited`。
-   - `balanceOf()`：查询 ETH 余额。
-   - `delegatedPayEth(address,uint256,uint256,bytes)`：委托支付 ETH；事件 `AgentPaid`。
-   - `depositERC20(address,uint256)`：入金 ERC20（先 `approve`）；事件 `AgentDepositedERC20`。
-   - `balanceOfERC20(address)`：查询 ERC20 余额。
-   - `delegatedPayERC20(address,address,uint256,uint256,bytes)`：委托支付 ERC20；事件 `AgentPaidERC20`。
+- 资金与支付
+  - `depositToAgent()`：入金 ETH；事件 `AgentDeposited`（仅记录事件，余额以链上实时值为准）。
+  - `balanceOf()`：查询 ETH 链上实时余额（`address(this).balance`），不维护内部账本。
+  - `delegatedPayEth(address,uint256,uint256,bytes)`：委托支付 ETH（基于链上余额校验）；事件 `AgentPaid`。
+  - `depositERC20(address,uint256)`：入金 ERC20（先 `approve`）；事件 `AgentDepositedERC20`（记录实际到账金额）。
+  - `balanceOfERC20(address)`：查询 ERC20 链上实时余额（`IERC20(token).balanceOf(agent)`）。
+  - `delegatedPayERC20(address,address,uint256,uint256,bytes)`：委托支付 ERC20（基于链上余额校验）；事件 `AgentPaidERC20`。
+  - 直接接收 ETH：允许直接向合约地址转入 ETH（`receive`/`fallback`）；同样触发 `AgentDeposited` 事件。
 
 - 元数据
   - `updateMetadata(string)`：更新元数据；事件 `MetadataUpdated`。
@@ -68,7 +69,10 @@
  生态开发注意点
  - 所有委托先查 `getNonce()`，并设置合理 `deadline`。
  - 冻结后所有委托失败，注意前端提示与重试策略。
- - 代币入金要先 `approve` 合约，再 `depositERC20`；若走反事实部署，可先直接转到预计算地址。
+  - 代币入金要先 `approve` 合约，再 `depositERC20`；若走反事实部署，可先直接转到预计算地址。
+  - 余额来源为链上实时值：`balanceOf`/`balanceOfERC20` 直接读取链上余额，无内部记账；强制转账或直接转账均可用。
+  - ETH 入金可以直接转账到 Agent 地址或调用 `depositToAgent`；两者都会记事件，余额一致。
+  - 对手续费型代币（fee-on-transfer），`depositERC20` 事件记录的为实际到账金额。
 
  中英对照表（函数名翻译）
  - 查询所有者：`ownerOf`

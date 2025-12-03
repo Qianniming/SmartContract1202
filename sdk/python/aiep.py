@@ -6,7 +6,14 @@ import urllib.request
 import urllib.error
 from web3 import Web3
 from eth_account import Account
-from eth_account.messages import encode_structured_data
+try:
+    from eth_account.messages import encode_structured_data
+    HAS_ENCODE_STRUCTURED = True
+except Exception:
+    encode_structured_data = None
+    HAS_ENCODE_STRUCTURED = False
+from eth_abi import encode as abi_encode
+from eth_keys import keys
 from eth_utils import keccak, to_checksum_address
 
 ABI: List[Any] = [
@@ -136,6 +143,74 @@ TYPES = {
     ]
 }
 
+# EIP-712 hashes for domain and types (mirror of contract constants)
+EIP712_DOMAIN_TYPEHASH = keccak(text="EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")
+PAY_ETH_TYPEHASH = keccak(text="PayEth(address to,uint256 amount,uint256 nonce,uint256 deadline)")
+PAY_ERC20_TYPEHASH = keccak(text="PayERC20(address token,address to,uint256 amount,uint256 nonce,uint256 deadline)")
+EXECUTE_TYPEHASH = keccak(text="Execute(address target,uint256 value,bytes32 dataHash,uint256 nonce,uint256 deadline)")
+NAME_HASH = keccak(text="AetheriaAgentDID")
+VERSION_HASH = keccak(text="1")
+
+def _domain_separator_py(chain_id: int, verifying_contract: str) -> bytes:
+    return keccak(abi_encode([
+        'bytes32', 'bytes32', 'bytes32', 'uint256', 'address'
+    ], [
+        EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, chain_id, to_checksum_address(verifying_contract)
+    ]))
+
+def _struct_hash_pay_eth(msg: Dict[str, Any]) -> bytes:
+    return keccak(abi_encode([
+        'bytes32', 'address', 'uint256', 'uint256', 'uint256'
+    ], [
+        PAY_ETH_TYPEHASH,
+        to_checksum_address(msg['to']),
+        int(msg['amount']),
+        int(msg['nonce']),
+        int(msg['deadline'])
+    ]))
+
+def _struct_hash_pay_erc20(msg: Dict[str, Any]) -> bytes:
+    return keccak(abi_encode([
+        'bytes32', 'address', 'address', 'uint256', 'uint256', 'uint256'
+    ], [
+        PAY_ERC20_TYPEHASH,
+        to_checksum_address(msg['token']),
+        to_checksum_address(msg['to']),
+        int(msg['amount']),
+        int(msg['nonce']),
+        int(msg['deadline'])
+    ]))
+
+def _struct_hash_execute(msg: Dict[str, Any]) -> bytes:
+    return keccak(abi_encode([
+        'bytes32', 'address', 'uint256', 'bytes32', 'uint256', 'uint256'
+    ], [
+        EXECUTE_TYPEHASH,
+        to_checksum_address(msg['target']),
+        int(msg['value']),
+        msg['dataHash'],
+        int(msg['nonce']),
+        int(msg['deadline'])
+    ]))
+
+def _digest(primary_type: str, message: Dict[str, Any], chain_id: int, verifying_contract: str) -> bytes:
+    ds = _domain_separator_py(chain_id, verifying_contract)
+    if primary_type == 'PayEth':
+        sh = _struct_hash_pay_eth(message)
+    elif primary_type == 'PayERC20':
+        sh = _struct_hash_pay_erc20(message)
+    elif primary_type == 'Execute':
+        sh = _struct_hash_execute(message)
+    else:
+        raise ValueError('unknown primary type')
+    return keccak(b"\x19\x01" + ds + sh)
+
+def _sign_digest(private_key: str, digest: bytes) -> bytes:
+    pk = private_key[2:] if private_key.startswith('0x') else private_key
+    priv = keys.PrivateKey(bytes.fromhex(pk))
+    sig = priv.sign_msg_hash(digest)
+    return sig.to_bytes()
+
 class AIEP:
     def __init__(self, w3: Web3, contract_address: str):
         self.w3 = w3
@@ -209,15 +284,18 @@ class AIEP:
     # --- delegated signed flows ---
     def _sign_typed(self, primary_type: str, message: Dict[str, Any], private_key: str):
         chain_id = self.w3.eth.chain_id
-        typed = {
-            'types': TYPES,
-            'primaryType': primary_type,
-            'domain': _domain(chain_id, self.address),
-            'message': message
-        }
-        msg = encode_structured_data(typed)
-        signed = Account.sign_message(msg, private_key)
-        return signed.signature
+        if HAS_ENCODE_STRUCTURED:
+            typed = {
+                'types': TYPES,
+                'primaryType': primary_type,
+                'domain': _domain(chain_id, self.address),
+                'message': message
+            }
+            msg = encode_structured_data(typed)
+            signed = Account.sign_message(msg, private_key)
+            return signed.signature
+        digest = _digest(primary_type, message, chain_id, self.address)
+        return _sign_digest(private_key, digest)
 
 
     def delegated_pay_eth(self, to: str, amount_wei: int, deadline: int, private_key: str):
@@ -227,12 +305,24 @@ class AIEP:
         func = self.contract.functions.delegatedPayEth(to_checksum_address(to), amount_wei, deadline, sig)
         return self._transact(func, private_key)
 
+    def sign_delegated_pay_eth(self, to: str, amount_wei: int, deadline: int, private_key: str) -> Dict[str, Any]:
+        nonce = self.get_nonce()
+        value = {"to": to_checksum_address(to), "amount": amount_wei, "nonce": nonce, "deadline": deadline}
+        sig = self._sign_typed("PayEth", value, private_key)
+        return {"domain": _domain(self.w3.eth.chain_id, self.address), "value": value, "signature": sig.hex()}
+
     def delegated_pay_erc20(self, token: str, to: str, amount: int, deadline: int, private_key: str):
         nonce = self.get_nonce()
         value = {"token": to_checksum_address(token), "to": to_checksum_address(to), "amount": amount, "nonce": nonce, "deadline": deadline}
         sig = self._sign_typed("PayERC20", value, private_key)
         func = self.contract.functions.delegatedPayERC20(to_checksum_address(token), to_checksum_address(to), amount, deadline, sig)
         return self._transact(func, private_key)
+
+    def sign_delegated_pay_erc20(self, token: str, to: str, amount: int, deadline: int, private_key: str) -> Dict[str, Any]:
+        nonce = self.get_nonce()
+        value = {"token": to_checksum_address(token), "to": to_checksum_address(to), "amount": amount, "nonce": nonce, "deadline": deadline}
+        sig = self._sign_typed("PayERC20", value, private_key)
+        return {"domain": _domain(self.w3.eth.chain_id, self.address), "value": value, "signature": sig.hex()}
 
     def delegated_execute(self, target: str, value_wei: int, data: bytes, deadline: int, private_key: str):
         nonce = self.get_nonce()
@@ -241,6 +331,13 @@ class AIEP:
         sig = self._sign_typed("Execute", value, private_key)
         func = self.contract.functions.delegatedExecute(to_checksum_address(target), value_wei, data, deadline, sig)
         return self._transact(func, private_key)
+
+    def sign_delegated_execute(self, target: str, value_wei: int, data: bytes, deadline: int, private_key: str) -> Dict[str, Any]:
+        nonce = self.get_nonce()
+        data_hash = keccak(data)
+        value = {"target": to_checksum_address(target), "value": value_wei, "dataHash": data_hash, "nonce": nonce, "deadline": deadline}
+        sig = self._sign_typed("Execute", value, private_key)
+        return {"domain": _domain(self.w3.eth.chain_id, self.address), "value": value, "signature": sig.hex()}
 
 
 class AIEPFactory:
@@ -311,12 +408,17 @@ class EasyAgent:
         self.factory.deploy_agent(owner_private_key, self.owner, self.signer_address, self.metadata_uri, self.salt)
         return self.address
 
-    def pay_erc20(self, token: str, to: str, amount: int, owner_private_key: str, deadline: Optional[int] = None):
+    def pay_erc20(self, token: str, to: str, amount: int, owner_private_key: str, deadline: Optional[int] = None, auto_refill: Optional[Dict[str, Any]] = None):
         dl = deadline or int(self.w3.eth.get_block('latest').timestamp) + 3600
         amt = self._normalize_amount_erc20(token, amount)
         code = self.w3.eth.get_code(self.address)
+        if auto_refill:
+            min_token = self._normalize_amount_erc20(token, auto_refill.get('min_token', amt))
+            bal = AIEP(self.w3, self.address).balance_of_erc20(token) if (code and len(code) > 0) else 0
+            if bal < min_token:
+                refill_amount = self._normalize_amount_erc20(token, auto_refill.get('refill_amount', min_token - bal))
+                self.fund_erc20(owner_private_key, token, refill_amount)
         if not code or len(code) == 0:
-            # sign with nonce=0 for counterfactual
             value = {"token": to_checksum_address(token), "to": to_checksum_address(to), "amount": amt, "nonce": 0, "deadline": dl}
             sig = self._sign_typed("PayERC20", value, self.signer_private_key)
             return self.factory.deploy_and_pay_erc20(owner_private_key, self.owner, self.signer_address, self.metadata_uri, self.salt,
@@ -324,9 +426,15 @@ class EasyAgent:
         agent = AIEP(self.w3, self.address)
         return agent.delegated_pay_erc20(token, to, amt, dl, self.signer_private_key)
 
-    def pay_eth(self, to: str, amount_wei: int, owner_private_key: str, deadline: Optional[int] = None):
+    def pay_eth(self, to: str, amount_wei: int, owner_private_key: str, deadline: Optional[int] = None, auto_refill: Optional[Dict[str, Any]] = None):
         dl = deadline or int(self.w3.eth.get_block('latest').timestamp) + 3600
         code = self.w3.eth.get_code(self.address)
+        if auto_refill:
+            min_wei = int(auto_refill.get('min_wei', amount_wei))
+            bal = AIEP(self.w3, self.address).balance_of() if (code and len(code) > 0) else 0
+            if bal < min_wei:
+                refill_wei = int(auto_refill.get('refill_wei', min_wei - bal))
+                self.fund_eth(owner_private_key, refill_wei)
         if not code or len(code) == 0:
             value = {"to": to_checksum_address(to), "amount": amount_wei, "nonce": 0, "deadline": dl}
             sig = self._sign_typed("PayEth", value, self.signer_private_key)
@@ -472,6 +580,37 @@ class SafeModule:
         return self.w3.eth.wait_for_transaction_receipt(tx_hash)
 
 
+class BatchSender:
+    def __init__(self, easy_agent: EasyAgent):
+        self.agent = easy_agent
+        self.items: List[Dict[str, Any]] = []
+
+    def add_pay_eth(self, to: str, amount_wei: int, owner_private_key: str, deadline: Optional[int] = None, auto_refill: Optional[Dict[str, Any]] = None):
+        self.items.append({"t": "eth", "to": to, "amount": amount_wei, "owner_pk": owner_private_key, "deadline": deadline, "auto_refill": auto_refill})
+
+    def add_pay_erc20(self, token: str, to: str, amount: Any, owner_private_key: str, deadline: Optional[int] = None, auto_refill: Optional[Dict[str, Any]] = None):
+        self.items.append({"t": "erc20", "token": token, "to": to, "amount": amount, "owner_pk": owner_private_key, "deadline": deadline, "auto_refill": auto_refill})
+
+    def add_execute(self, target: str, value_wei: int, data: bytes, owner_private_key: str, deadline: Optional[int] = None):
+        self.items.append({"t": "exec", "target": target, "value": value_wei, "data": data, "owner_pk": owner_private_key, "deadline": deadline})
+
+    def send(self) -> List[Any]:
+        self.agent.ensure_deployed(self.items[0]["owner_pk"]) if self.items else None
+        results = []
+        for it in self.items:
+            if it["t"] == "eth":
+                r = self.agent.pay_eth(it["to"], it["amount"], it["owner_pk"], it["deadline"], it.get("auto_refill"))
+                results.append(r)
+            elif it["t"] == "erc20":
+                r = self.agent.pay_erc20(it["token"], it["to"], it["amount"], it["owner_pk"], it["deadline"], it.get("auto_refill"))
+                results.append(r)
+            elif it["t"] == "exec":
+                dl = it["deadline"] or int(self.agent.w3.eth.get_block('latest').timestamp) + 3600
+                r = AIEP(self.agent.w3, self.agent.address).delegated_execute(it["target"], it["value"], it["data"], dl, self.agent.signer_private_key)
+                results.append(r)
+        return results
+
+
 class BundlerClient:
     def __init__(self, url: str):
         self.url = url
@@ -544,3 +683,41 @@ def send_userop(client: BundlerClient, entry_point: str, userop: Dict[str, Any],
             time.sleep((backoff_ms / 1000.0) * (2 ** attempt))
             attempt += 1
     raise RuntimeError(last_err)
+
+
+class RelayerClient:
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None):
+        self.base_url = base_url
+        self.headers = headers or {}
+
+    def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        data = json.dumps(body).encode()
+        req = urllib.request.Request(self.base_url + path, data=data, headers={"Content-Type": "application/json", **self.headers})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw)
+
+    def submit_delegated_pay_eth(self, agent: str, to: str, amount_wei: int, deadline: int, signature: str) -> Dict[str, Any]:
+        body = {"agent": agent, "to": to, "amountWei": str(amount_wei), "deadline": deadline, "signature": signature}
+        return self._post("/eth/delegated-pay-eth", body)
+
+    def submit_delegated_pay_erc20(self, agent: str, token: str, to: str, amount: int, deadline: int, signature: str) -> Dict[str, Any]:
+        body = {"agent": agent, "token": token, "to": to, "amount": str(amount), "deadline": deadline, "signature": signature}
+        return self._post("/eth/delegated-pay-erc20", body)
+
+    def submit_delegated_execute(self, agent: str, target: str, value_wei: int, data_hex: str, deadline: int, signature: str) -> Dict[str, Any]:
+        body = {"agent": agent, "target": target, "valueWei": str(value_wei), "data": data_hex, "deadline": deadline, "signature": signature}
+        return self._post("/eth/delegated-execute", body)
+
+
+class JitoRelayer:
+    def __init__(self, base_url: str, headers: Optional[Dict[str, str]] = None):
+        self.base_url = base_url
+        self.headers = headers or {}
+
+    def submit_bundle(self, transactions: List[str]) -> Dict[str, Any]:
+        data = json.dumps({"transactions": transactions}).encode()
+        req = urllib.request.Request(self.base_url + "/solana/jito/bundle", data=data, headers={"Content-Type": "application/json", **self.headers})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode()
+            return json.loads(raw)

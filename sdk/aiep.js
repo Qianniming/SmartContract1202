@@ -93,6 +93,14 @@ class AIEP {
     const signature = await signer.signTypedData(domain, { PayEth: Types.PayEth }, value);
     return await this.contract.delegatedPayEth(to, amountWei, deadline, signature);
   }
+  async signDelegatedPayEth(to, amountWei, deadline, signer) {
+    const chainId = (await this.provider.getNetwork()).chainId;
+    const domain = getDomain(chainId, this.address);
+    const nonce = Number(await this.getNonce());
+    const value = { to, amount: amountWei, nonce, deadline };
+    const signature = await signer.signTypedData(domain, { PayEth: Types.PayEth }, value);
+    return { domain, value, signature };
+  }
   async delegatedPayERC20(token, to, amount, deadline, signer) {
     const chainId = (await this.provider.getNetwork()).chainId;
     const domain = getDomain(chainId, this.address);
@@ -100,6 +108,14 @@ class AIEP {
     const value = { token, to, amount, nonce, deadline };
     const signature = await signer.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
     return await this.contract.delegatedPayERC20(token, to, amount, deadline, signature);
+  }
+  async signDelegatedPayERC20(token, to, amount, deadline, signer) {
+    const chainId = (await this.provider.getNetwork()).chainId;
+    const domain = getDomain(chainId, this.address);
+    const nonce = Number(await this.getNonce());
+    const value = { token, to, amount, nonce, deadline };
+    const signature = await signer.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
+    return { domain, value, signature };
   }
   async delegatedExecute(target, valueWei, data, deadline, signer) {
     const chainId = (await this.provider.getNetwork()).chainId;
@@ -109,6 +125,15 @@ class AIEP {
     const v = { target, value: valueWei, dataHash, nonce, deadline };
     const signature = await signer.signTypedData(domain, { Execute: Types.Execute }, v);
     return await this.contract.delegatedExecute(target, valueWei, data, deadline, signature);
+  }
+  async signDelegatedExecute(target, valueWei, data, deadline, signer) {
+    const chainId = (await this.provider.getNetwork()).chainId;
+    const domain = getDomain(chainId, this.address);
+    const nonce = Number(await this.getNonce());
+    const dataHash = ethers.keccak256(data);
+    const v = { target, value: valueWei, dataHash, nonce, deadline };
+    const signature = await signer.signTypedData(domain, { Execute: Types.Execute }, v);
+    return { domain, value: v, signature };
   }
 }
 
@@ -169,13 +194,21 @@ class EasyAgent {
     await this.factory.deployAgent(this.owner, agentAddr, this.metadataURI, this.salt);
     return addr;
   }
-  async payERC20(token, to, amount, deadlineSec) {
+  async payERC20(token, to, amount, deadlineSec, opts) {
     const addr = await this.getAddress();
     const deadline = deadlineSec || Math.floor(Date.now() / 1000) + 3600;
     const agent = new AIEP(this.ownerSigner, addr);
     const normalized = await normalizeAmountERC20(this.provider, token, amount);
     const code = await this.provider.getCode(addr);
     const toAddr = await resolveToAddress(this.provider, to);
+    if (opts && opts.autoRefill) {
+      const min = await normalizeAmountERC20(this.provider, token, opts.autoRefill.minToken || normalized);
+      const bal = await agent.balanceOfERC20(token);
+      if (bal < min) {
+        const refillAmt = opts.autoRefill.refillAmount || (min - bal);
+        await this.fundERC20(token, refillAmt);
+      }
+    }
     if (!code || code === "0x") {
       const sig = await this._signPayERC20(addr, token, toAddr, normalized, deadline);
       const agentAddr = await this.agentSigner.getAddress();
@@ -183,13 +216,21 @@ class EasyAgent {
     }
     return await agent.delegatedPayERC20(token, toAddr, normalized, deadline, this.agentSigner);
   }
-  async payEth(to, amountWei, deadlineSec) {
+  async payEth(to, amountWei, deadlineSec, opts) {
     const addr = await this.getAddress();
     const deadline = deadlineSec || Math.floor(Date.now() / 1000) + 3600;
     const agent = new AIEP(this.ownerSigner, addr);
     const code = await this.provider.getCode(addr);
     const toAddr = await resolveToAddress(this.provider, to);
     const wei = await normalizeWei(amountWei);
+    if (opts && opts.autoRefill) {
+      const min = await normalizeWei(opts.autoRefill.minWei || wei);
+      const bal = await agent.balanceOf();
+      if (bal < min) {
+        const refillWei = await normalizeWei(opts.autoRefill.refillWei || (min - bal));
+        await this.fundEth(refillWei);
+      }
+    }
     if (!code || code === "0x") {
       const sig = await this._signPayEth(addr, toAddr, wei, deadline);
       const agentAddr = await this.agentSigner.getAddress();
@@ -315,3 +356,85 @@ class SafeModule {
 module.exports.AIEPFactory = AIEPFactory;
 module.exports.EasyAgent = EasyAgent;
 module.exports.SafeModule = SafeModule;
+class RelayerClient {
+  constructor(baseUrl, opts = {}) {
+    this.baseUrl = baseUrl;
+    this.headers = opts.headers || {};
+  }
+  async submitDelegatedPayEth(agent, to, amountWei, deadline, signature) {
+    const url = `${this.baseUrl}/eth/delegated-pay-eth`;
+    const body = { agent, to, amountWei: amountWei.toString(), deadline, signature };
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
+    const json = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(json));
+    return json;
+  }
+  async submitDelegatedPayERC20(agent, token, to, amount, deadline, signature) {
+    const url = `${this.baseUrl}/eth/delegated-pay-erc20`;
+    const body = { agent, token, to, amount: amount.toString(), deadline, signature };
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
+    const json = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(json));
+    return json;
+  }
+  async submitDelegatedExecute(agent, target, valueWei, data, deadline, signature) {
+    const url = `${this.baseUrl}/eth/delegated-execute`;
+    const body = { agent, target, valueWei: valueWei.toString(), data, deadline, signature };
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
+    const json = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(json));
+    return json;
+  }
+}
+class JitoRelayer {
+  constructor(baseUrl, opts = {}) {
+    this.client = new RelayerClient(baseUrl, opts);
+  }
+  async submitBundle(transactions) {
+    const url = `${this.client.baseUrl}/solana/jito/bundle`;
+    const body = { transactions };
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.client.headers }, body: JSON.stringify(body) });
+    const json = await res.json();
+    if (!res.ok) throw new Error(JSON.stringify(json));
+    return json;
+  }
+}
+module.exports.RelayerClient = RelayerClient;
+module.exports.JitoRelayer = JitoRelayer;
+
+class BatchSender {
+  constructor(easyAgent) {
+    this.agent = easyAgent;
+    this.items = [];
+  }
+  addPayEth(to, amountWei, deadlineSec, opts) {
+    this.items.push({ t: "eth", to, amountWei, deadlineSec, opts });
+  }
+  addPayERC20(token, to, amount, deadlineSec, opts) {
+    this.items.push({ t: "erc20", token, to, amount, deadlineSec, opts });
+  }
+  addExecute(target, valueWei, data, deadlineSec) {
+    this.items.push({ t: "exec", target, valueWei, data, deadlineSec });
+  }
+  async send() {
+    const addr = await this.agent.ensureDeployed();
+    const res = [];
+    for (const it of this.items) {
+      if (it.t === "eth") {
+        const r = await this.agent.payEth(it.to, it.amountWei, it.deadlineSec, it.opts);
+        res.push(r);
+      } else if (it.t === "erc20") {
+        const r = await this.agent.payERC20(it.token, it.to, it.amount, it.deadlineSec, it.opts);
+        res.push(r);
+      } else if (it.t === "exec") {
+        const deadline = it.deadlineSec || Math.floor(Date.now() / 1000) + 3600;
+        const aiep = new AIEP(this.agent.ownerSigner, addr);
+        const r = await aiep.delegatedExecute(it.target, await normalizeWei(it.valueWei || 0n), it.data, deadline, this.agent.agentSigner);
+        res.push(r);
+      }
+    }
+    return res;
+  }
+}
+
+module.exports.BatchSender = BatchSender;
