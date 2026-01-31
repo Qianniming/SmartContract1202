@@ -6,7 +6,7 @@ import { Loader2, AlertTriangle, Key, UserCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 export default function Settings() {
-  const { address } = useAccount();
+  const { address, chain } = useAccount();
   const { agentAddress } = useAgentStore();
   
   const [newSigner, setNewSigner] = useState('');
@@ -34,28 +34,37 @@ export default function Settings() {
   const isOwner = address && owner && address.toLowerCase() === (owner as string).toLowerCase();
 
   const handleSetSigner = () => {
+    if (!address || !chain) return;
     writeContract({
       address: agentAddress as `0x${string}`,
-      abi: AetheriaAgentDIDABI.abi,
+      abi: AetheriaAgentDIDABI.abi as any,
       functionName: 'setAgentSigner',
       args: [newSigner],
+      account: address,
+      chain: chain,
     });
   };
 
   const handleFreeze = () => {
+    if (!address || !chain) return;
     writeContract({
       address: agentAddress as `0x${string}`,
-      abi: AetheriaAgentDIDABI.abi,
+      abi: AetheriaAgentDIDABI.abi as any,
       functionName: isFrozen ? 'unfreezeAgent' : 'freezeAgent',
+      account: address,
+      chain: chain,
     });
   };
 
   const handleTransferOwnership = () => {
+    if (!address || !chain) return;
     writeContract({
       address: agentAddress as `0x${string}`,
-      abi: AetheriaAgentDIDABI.abi,
+      abi: AetheriaAgentDIDABI.abi as any,
       functionName: 'transferAgentOwnership',
       args: [newOwner],
+      account: address,
+      chain: chain,
     });
   };
 
