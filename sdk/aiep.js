@@ -1,9 +1,29 @@
+/**
+ * AIEP (AI-Agent Identity & Execution Protocol) JavaScript SDK
+ * 用于与 AetheriaAgentDID 智能合约交互的官方 SDK。
+ * 支持 DID 身份管理、EIP-712 委托支付和执行、以及反事实部署逻辑。
+ */
+
 const { ethers } = require("ethers");
 
+/**
+ * 获取 EIP-712 域信息
+ * @param {number} chainId 链 ID
+ * @param {string} verifyingContract 验证签名的合约地址
+ */
 function getDomain(chainId, verifyingContract) {
-  return { name: "AetheriaAgentDID", version: "1", chainId, verifyingContract };
+  return {
+    name: "AetheriaAgentDID",
+    version: "1",
+    chainId,
+    verifyingContract
+  };
 }
 
+/**
+ * EIP-712 结构化数据类型定义
+ * 必须与 AetheriaAgentDID.sol 中的 TYPEHASH 定义保持完全一致
+ */
 const Types = {
   PayEth: [
     { name: "to", type: "address" },
@@ -27,6 +47,9 @@ const Types = {
   ]
 };
 
+/**
+ * AetheriaAgentDID 核心合约 ABI
+ */
 const ABI = [
   "function ownerOf() view returns (address)",
   "function setAgentSigner(address)",
@@ -45,6 +68,9 @@ const ABI = [
   "function delegatedExecute(address,uint256,bytes,uint256,bytes)"
 ];
 
+/**
+ * AetheriaFactory 工厂合约 ABI
+ */
 const FACTORY_ABI = [
   "event AgentDeployed(address indexed agent, address indexed owner, address indexed signer)",
   "function deployAgent(address,address,string,bytes32) returns (address)",
@@ -54,6 +80,9 @@ const FACTORY_ABI = [
   "function deployAndDelegatedExecute(address,address,string,bytes32,address,uint256,bytes,uint256,bytes) returns (address)"
 ];
 
+/**
+ * AetheriaSafeModule 模块 ABI (用于 Gnosis Safe 扩展)
+ */
 const SAFE_MODULE_ABI = [
   "function safe() view returns (address)",
   "function signer() view returns (address)",
@@ -67,374 +96,319 @@ const SAFE_MODULE_ABI = [
   "function delegatedExecute(address,uint256,bytes,uint256,bytes)"
 ];
 
+/**
+ * AIEP 类：处理已部署 Agent 合约的交互
+ */
 class AIEP {
+  /**
+   * @param {ethers.Provider | ethers.Signer} providerOrSigner Ethers 提供者或签名者
+   * @param {string} address Agent 合约地址
+   */
   constructor(providerOrSigner, address) {
     this.provider = providerOrSigner;
     this.address = address;
     this.contract = new ethers.Contract(address, ABI, providerOrSigner);
   }
+
+  // --- 基础状态查询 ---
   async ownerOf() { return await this.contract.ownerOf(); }
-  async setAgentSigner(signer) { return await this.contract.setAgentSigner(signer); }
-  async transferAgentOwnership(to) { return await this.contract.transferAgentOwnership(to); }
   async getNonce() { return await this.contract.getNonce(); }
-  async depositToAgent(amountWei) { return await this.contract.depositToAgent({ value: amountWei }); }
   async balanceOf() { return await this.contract.balanceOf(); }
-  async depositERC20(token, amount) { return await this.contract.depositERC20(token, amount); }
   async balanceOfERC20(token) { return await this.contract.balanceOfERC20(token); }
-  async updateMetadata(uri) { return await this.contract.updateMetadata(uri); }
   async did() { return await this.contract.did(); }
   async isFrozen() { return await this.contract.isFrozen(); }
   async getAgentSigner() { return await this.contract.getAgentSigner(); }
+
+  // --- 所有者权限操作 ---
+  async setAgentSigner(signer) { return await this.contract.setAgentSigner(signer); }
+  async transferAgentOwnership(to) { return await this.contract.transferAgentOwnership(to); }
+  async updateMetadata(uri) { return await this.contract.updateMetadata(uri); }
+  async depositToAgent(amountWei) { return await this.contract.depositToAgent({ value: amountWei }); }
+  async depositERC20(token, amount) { return await this.contract.depositERC20(token, amount); }
+
+  // --- 委托支付与执行 (EIP-712) ---
+
+  /**
+   * 委托支付原生 ETH
+   * @param {string} to 接收者
+   * @param {bigint} amountWei 金额
+   * @param {number} deadline 截止时间戳
+   * @param {ethers.Signer} signer 具备签名权限的热密钥
+   */
   async delegatedPayEth(to, amountWei, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
-    const value = { to, amount: amountWei, nonce, deadline };
-    const signature = await signer.signTypedData(domain, { PayEth: Types.PayEth }, value);
+    const { domain, value, signature } = await this.signDelegatedPayEth(to, amountWei, deadline, signer);
     return await this.contract.delegatedPayEth(to, amountWei, deadline, signature);
   }
+
   async signDelegatedPayEth(to, amountWei, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
+    const network = await (signer.provider || this.provider).getNetwork();
+    const chainId = network.chainId;
     const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
+    const nonce = await this.getNonce();
     const value = { to, amount: amountWei, nonce, deadline };
     const signature = await signer.signTypedData(domain, { PayEth: Types.PayEth }, value);
     return { domain, value, signature };
   }
+
+  /**
+   * 委托支付 ERC20 代币
+   */
   async delegatedPayERC20(token, to, amount, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
-    const value = { token, to, amount, nonce, deadline };
-    const signature = await signer.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
+    const { signature } = await this.signDelegatedPayERC20(token, to, amount, deadline, signer);
     return await this.contract.delegatedPayERC20(token, to, amount, deadline, signature);
   }
+
   async signDelegatedPayERC20(token, to, amount, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
+    const network = await (signer.provider || this.provider).getNetwork();
+    const chainId = network.chainId;
     const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
+    const nonce = await this.getNonce();
     const value = { token, to, amount, nonce, deadline };
     const signature = await signer.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
     return { domain, value, signature };
   }
+
+  /**
+   * 委托执行任意合约调用
+   */
   async delegatedExecute(target, valueWei, data, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
-    const dataHash = ethers.keccak256(data);
-    const v = { target, value: valueWei, dataHash, nonce, deadline };
-    const signature = await signer.signTypedData(domain, { Execute: Types.Execute }, v);
+    const { signature } = await this.signDelegatedExecute(target, valueWei, data, deadline, signer);
     return await this.contract.delegatedExecute(target, valueWei, data, deadline, signature);
   }
+
   async signDelegatedExecute(target, valueWei, data, deadline, signer) {
-    const chainId = (await this.provider.getNetwork()).chainId;
+    const network = await (signer.provider || this.provider).getNetwork();
+    const chainId = network.chainId;
     const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.getNonce());
+    const nonce = await this.getNonce();
     const dataHash = ethers.keccak256(data);
-    const v = { target, value: valueWei, dataHash, nonce, deadline };
-    const signature = await signer.signTypedData(domain, { Execute: Types.Execute }, v);
-    return { domain, value: v, signature };
+    const value = { target, value: valueWei, dataHash, nonce, deadline };
+    const signature = await signer.signTypedData(domain, { Execute: Types.Execute }, value);
+    return { domain, value, signature };
   }
 }
 
-const Permissions = {
-  READ: 1,
-  WRITE: 2,
-  EDIT_PROFILE: 4,
-  PAY: 8,
-  REGISTER_SERVICE: 16,
-  EXECUTE: 32
-};
-
-function buildDid(chainId, contract) {
-  return `did:ethr:${chainId}:${contract}`;
-}
-
-module.exports = { AIEP, Types, getDomain, Permissions, buildDid };
-
+/**
+ * AIEPFactory 类：处理 Agent 的创建和预计算地址
+ */
 class AIEPFactory {
   constructor(providerOrSigner, address) {
     this.provider = providerOrSigner;
     this.address = address;
     this.contract = new ethers.Contract(address, FACTORY_ABI, providerOrSigner);
   }
+
   async computeAddress(owner, signer, metadataURI, salt) {
     return await this.contract.computeAddress(owner, signer, metadataURI, salt);
   }
+
   async deployAgent(owner, signer, metadataURI, salt) {
     return await this.contract.deployAgent(owner, signer, metadataURI, salt);
   }
 }
 
+/**
+ * EasyAgent 类：高级封装，支持“即用即部署”的反事实逻辑
+ */
 class EasyAgent {
+  /**
+   * @param {ethers.Provider} provider 
+   * @param {string} factoryAddress 
+   * @param {ethers.Signer} ownerSigner 所有者签名者 (冷钱包)
+   * @param {ethers.Signer} agentSigner 代理签名者 (热密钥)
+   * @param {object} opts 配置项 (metadataURI, salt)
+   */
   constructor(provider, factoryAddress, ownerSigner, agentSigner, opts = {}) {
     this.provider = provider;
     this.factory = new AIEPFactory(ownerSigner, factoryAddress);
     this.ownerSigner = ownerSigner;
     this.agentSigner = agentSigner;
-    this.metadataURI = opts.metadataURI || "ipfs://agent-profile";
-    this.customSalt = opts.salt; // optional
+    this.metadataURI = opts.metadataURI || "ipfs://aetheria-agent-profile";
+    this.customSalt = opts.salt;
     this.addressPromise = null;
   }
+
+  /**
+   * 预计算 Agent 的合约地址
+   */
   async getAddress() {
     if (this.addressPromise) return await this.addressPromise;
     const ownerAddr = await this.ownerSigner.getAddress();
     const agentAddr = await this.agentSigner.getAddress();
-    const salt = this.customSalt || ethers.keccak256(ethers.toUtf8Bytes(ownerAddr + ":" + agentAddr));
-    this.salt = salt;
+    // 如果没有提供自定义 salt，则根据所有者和签名者地址生成确定性 salt
+    this.salt = this.customSalt || ethers.keccak256(ethers.toUtf8Bytes(`${ownerAddr}:${agentAddr}`));
     this.owner = ownerAddr;
-    this.addressPromise = this.factory.computeAddress(ownerAddr, agentAddr, this.metadataURI, salt);
+    this.addressPromise = this.factory.computeAddress(ownerAddr, agentAddr, this.metadataURI, this.salt);
     return await this.addressPromise;
   }
+
+  /**
+   * 确保 Agent 已部署在链上
+   */
   async ensureDeployed() {
     const addr = await this.getAddress();
     const code = await this.provider.getCode(addr);
     if (code && code !== "0x") return addr;
     const agentAddr = await this.agentSigner.getAddress();
-    await this.factory.deployAgent(this.owner, agentAddr, this.metadataURI, this.salt);
+    const tx = await this.factory.deployAgent(this.owner, agentAddr, this.metadataURI, this.salt);
+    await tx.wait();
     return addr;
   }
-  async payERC20(token, to, amount, deadlineSec, opts) {
+
+  /**
+   * 支付 ERC20 代币 (如果未部署，则合并部署与支付交易)
+   */
+  async payERC20(token, to, amount, deadlineSec, opts = {}) {
     const addr = await this.getAddress();
     const deadline = deadlineSec || Math.floor(Date.now() / 1000) + 3600;
     const agent = new AIEP(this.ownerSigner, addr);
-    const normalized = await normalizeAmountERC20(this.provider, token, amount);
+    const normalizedAmount = await normalizeAmountERC20(this.provider, token, amount);
     const code = await this.provider.getCode(addr);
     const toAddr = await resolveToAddress(this.provider, to);
-    if (opts && opts.autoRefill) {
-      const min = await normalizeAmountERC20(this.provider, token, opts.autoRefill.minToken || normalized);
-      const bal = await agent.balanceOfERC20(token);
+
+    // 自动补足资金逻辑
+    if (opts.autoRefill) {
+      const min = await normalizeAmountERC20(this.provider, token, opts.autoRefill.minToken || amount);
+      const bal = (code && code !== "0x") ? await agent.balanceOfERC20(token) : 0n;
       if (bal < min) {
         const refillAmt = opts.autoRefill.refillAmount || (min - bal);
         await this.fundERC20(token, refillAmt);
       }
     }
+
     if (!code || code === "0x") {
-      const sig = await this._signPayERC20(addr, token, toAddr, normalized, deadline);
+      // 合并部署交易
+      const chainId = (await this.provider.getNetwork()).chainId;
+      const domain = getDomain(chainId, addr);
+      const value = { token, to: toAddr, amount: normalizedAmount, nonce: 0, deadline };
+      const signature = await this.agentSigner.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
       const agentAddr = await this.agentSigner.getAddress();
-      return await this.factory.contract.deployAndDelegatedPayERC20(this.owner, agentAddr, this.metadataURI, this.salt, token, toAddr, normalized, deadline, sig);
+      return await this.factory.contract.deployAndDelegatedPayERC20(
+        this.owner, agentAddr, this.metadataURI, this.salt, 
+        token, toAddr, normalizedAmount, deadline, signature
+      );
     }
-    return await agent.delegatedPayERC20(token, toAddr, normalized, deadline, this.agentSigner);
+    return await agent.delegatedPayERC20(token, toAddr, normalizedAmount, deadline, this.agentSigner);
   }
-  async payEth(to, amountWei, deadlineSec, opts) {
+
+  /**
+   * 支付 ETH (如果未部署，则合并部署与支付交易)
+   */
+  async payEth(to, amountWei, deadlineSec, opts = {}) {
     const addr = await this.getAddress();
     const deadline = deadlineSec || Math.floor(Date.now() / 1000) + 3600;
     const agent = new AIEP(this.ownerSigner, addr);
     const code = await this.provider.getCode(addr);
     const toAddr = await resolveToAddress(this.provider, to);
     const wei = await normalizeWei(amountWei);
-    if (opts && opts.autoRefill) {
+
+    if (opts.autoRefill) {
       const min = await normalizeWei(opts.autoRefill.minWei || wei);
-      const bal = await agent.balanceOf();
+      const bal = (code && code !== "0x") ? await agent.balanceOf() : 0n;
       if (bal < min) {
         const refillWei = await normalizeWei(opts.autoRefill.refillWei || (min - bal));
         await this.fundEth(refillWei);
       }
     }
+
     if (!code || code === "0x") {
-      const sig = await this._signPayEth(addr, toAddr, wei, deadline);
+      const chainId = (await this.provider.getNetwork()).chainId;
+      const domain = getDomain(chainId, addr);
+      const value = { to: toAddr, amount: wei, nonce: 0, deadline };
+      const signature = await this.agentSigner.signTypedData(domain, { PayEth: Types.PayEth }, value);
       const agentAddr = await this.agentSigner.getAddress();
-      return await this.factory.contract.deployAndDelegatedPayEth(this.owner, agentAddr, this.metadataURI, this.salt, toAddr, wei, deadline, sig);
+      return await this.factory.contract.deployAndDelegatedPayEth(
+        this.owner, agentAddr, this.metadataURI, this.salt, 
+        toAddr, wei, deadline, signature
+      );
     }
     return await agent.delegatedPayEth(toAddr, wei, deadline, this.agentSigner);
   }
-  async updateMetadata(uri) {
-    const addr = await this.ensureDeployed();
-    const agent = new AIEP(this.ownerSigner, addr);
-    return await agent.updateMetadata(uri);
+
+  /**
+   * 给 Agent 充值 ETH
+   */
+  async fundEth(amount) {
+    const addr = await this.getAddress();
+    const wei = await normalizeWei(amount);
+    const code = await this.provider.getCode(addr);
+    if (code && code !== '0x') {
+      const agent = new AIEP(this.ownerSigner, addr);
+      return await agent.depositToAgent(wei);
+    }
+    return await this.ownerSigner.sendTransaction({ to: addr, value: wei });
   }
-  async _signPayERC20(addr, token, to, amount, deadline) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, addr);
-    const nonce = 0;
-    const value = { token, to, amount, nonce, deadline };
-    return await this.agentSigner.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
+
+  /**
+   * 给 Agent 充值 ERC20
+   */
+  async fundERC20(token, amount) {
+    const addr = await this.getAddress();
+    const amt = await normalizeAmountERC20(this.provider, token, amount);
+    const erc20 = new ethers.Contract(token, ["function transfer(address,uint256) returns (bool)"], this.ownerSigner);
+    return await erc20.transfer(addr, amt);
   }
-  async _signPayEth(addr, to, amountWei, deadline) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, addr);
-    const nonce = 0;
-    const value = { to, amount: amountWei, nonce, deadline };
-    return await this.agentSigner.signTypedData(domain, { PayEth: Types.PayEth }, value);
+
+  async getStatus(token = null) {
+    const addr = await this.getAddress();
+    const code = await this.provider.getCode(addr);
+    const deployed = !!(code && code !== '0x');
+    let ethBalance = 0n;
+    let erc20Balance = null;
+    if (deployed) {
+      const agent = new AIEP(this.provider, addr);
+      ethBalance = await agent.balanceOf();
+      if (token) erc20Balance = await agent.balanceOfERC20(token);
+    }
+    return { address: addr, deployed, ethBalance, erc20Balance };
   }
 }
 
+/**
+ * 辅助函数：格式化 ERC20 金额 (支持字符串形式的单位，如 "1.5")
+ */
 async function normalizeAmountERC20(provider, token, amount) {
-  if (typeof amount === 'bigint' || typeof amount === 'number') return amount;
+  if (typeof amount === 'bigint') return amount;
+  if (typeof amount === 'number') return BigInt(amount);
   if (typeof amount === 'string') {
-    const decAbi = ["function decimals() view returns (uint8)"];
-    const erc20 = new ethers.Contract(token, decAbi, provider);
+    const erc20 = new ethers.Contract(token, ["function decimals() view returns (uint8)"], provider);
     const decimals = await erc20.decimals();
     return ethers.parseUnits(amount, decimals);
   }
-  throw new Error("amount must be string|number|bigint");
+  throw new Error("Invalid amount type: must be string, number or bigint");
 }
 
+/**
+ * 辅助函数：格式化 ETH 金额
+ */
+async function normalizeWei(amount) {
+  if (typeof amount === 'bigint') return amount;
+  if (typeof amount === 'number') return BigInt(amount);
+  if (typeof amount === 'string') return ethers.parseEther(amount);
+  throw new Error('Invalid wei amount: must be string, number or bigint');
+}
+
+/**
+ * 辅助函数：解析地址 (支持 ENS，如 "vitalik.eth")
+ */
 async function resolveToAddress(provider, to) {
   if (typeof to !== 'string') return to;
   if (to.endsWith('.eth')) {
     const resolved = await provider.resolveName(to);
-    if (!resolved) throw new Error('ENS name not resolved');
+    if (!resolved) throw new Error(`ENS name could not be resolved: ${to}`);
     return resolved;
   }
   return to;
 }
 
-async function normalizeWei(amount) {
-  if (typeof amount === 'bigint') return amount;
-  if (typeof amount === 'number') return BigInt(amount);
-  if (typeof amount === 'string') return ethers.parseEther(amount);
-  throw new Error('amount must be string|number|bigint');
-}
-
-EasyAgent.prototype.getStatus = async function(token) {
-  const addr = await this.getAddress();
-  const code = await this.provider.getCode(addr);
-  const deployed = !!(code && code !== '0x');
-  let ethBalance = 0n;
-  let erc20Balance = null;
-  if (deployed) {
-    const agent = new AIEP(this.provider, addr);
-    ethBalance = await agent.balanceOf();
-    if (token) erc20Balance = await agent.balanceOfERC20(token);
-  }
-  return { address: addr, deployed, ethBalance, erc20Balance };
+/**
+ * 导出模块
+ */
+module.exports = {
+  AIEP,
+  AIEPFactory,
+  EasyAgent,
+  Types,
+  getDomain,
+  buildDid: (chainId, contract) => `did:ethr:${chainId}:${contract.toLowerCase()}`
 };
-
-EasyAgent.prototype.fundEth = async function(amount) {
-  const addr = await this.getAddress();
-  const wei = await normalizeWei(amount);
-  const code = await this.provider.getCode(addr);
-  if (code && code !== '0x') {
-    const agent = new AIEP(this.ownerSigner, addr);
-    return await agent.depositToAgent(wei);
-  }
-  return await this.ownerSigner.sendTransaction({ to: addr, value: wei });
-};
-
-EasyAgent.prototype.fundERC20 = async function(token, amount) {
-  const addr = await this.getAddress();
-  const amt = await normalizeAmountERC20(this.provider, token, amount);
-  const abi = ["function transfer(address to, uint256 amount) returns (bool)"];
-  const erc20 = new ethers.Contract(token, abi, this.ownerSigner);
-  return await erc20.transfer(addr, amt);
-};
-
-class SafeModule {
-  constructor(providerOrSigner, moduleAddress) {
-    this.provider = providerOrSigner;
-    this.address = moduleAddress;
-    this.contract = new ethers.Contract(moduleAddress, SAFE_MODULE_ABI, providerOrSigner);
-  }
-  async delegatedPayEth(to, amountWei, deadline, agentSigner) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.contract.nonce());
-    const value = { to, amount: amountWei, nonce, deadline };
-    const signature = await agentSigner.signTypedData(domain, { PayEth: Types.PayEth }, value);
-    return await this.contract.delegatedPayEth(to, amountWei, deadline, signature);
-  }
-  async delegatedPayERC20(token, to, amount, deadline, agentSigner) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.contract.nonce());
-    const value = { token, to, amount, nonce, deadline };
-    const signature = await agentSigner.signTypedData(domain, { PayERC20: Types.PayERC20 }, value);
-    return await this.contract.delegatedPayERC20(token, to, amount, deadline, signature);
-  }
-  async delegatedExecute(target, valueWei, data, deadline, agentSigner) {
-    const chainId = (await this.provider.getNetwork()).chainId;
-    const domain = getDomain(chainId, this.address);
-    const nonce = Number(await this.contract.nonce());
-    const dataHash = ethers.keccak256(data);
-    const v = { target, value: valueWei, dataHash, nonce, deadline };
-    const signature = await agentSigner.signTypedData(domain, { Execute: Types.Execute }, v);
-    return await this.contract.delegatedExecute(target, valueWei, data, deadline, signature);
-  }
-}
-
-module.exports.AIEPFactory = AIEPFactory;
-module.exports.EasyAgent = EasyAgent;
-module.exports.SafeModule = SafeModule;
-class RelayerClient {
-  constructor(baseUrl, opts = {}) {
-    this.baseUrl = baseUrl;
-    this.headers = opts.headers || {};
-  }
-  async submitDelegatedPayEth(agent, to, amountWei, deadline, signature) {
-    const url = `${this.baseUrl}/eth/delegated-pay-eth`;
-    const body = { agent, to, amountWei: amountWei.toString(), deadline, signature };
-    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
-    const json = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(json));
-    return json;
-  }
-  async submitDelegatedPayERC20(agent, token, to, amount, deadline, signature) {
-    const url = `${this.baseUrl}/eth/delegated-pay-erc20`;
-    const body = { agent, token, to, amount: amount.toString(), deadline, signature };
-    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
-    const json = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(json));
-    return json;
-  }
-  async submitDelegatedExecute(agent, target, valueWei, data, deadline, signature) {
-    const url = `${this.baseUrl}/eth/delegated-execute`;
-    const body = { agent, target, valueWei: valueWei.toString(), data, deadline, signature };
-    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.headers }, body: JSON.stringify(body) });
-    const json = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(json));
-    return json;
-  }
-}
-class JitoRelayer {
-  constructor(baseUrl, opts = {}) {
-    this.client = new RelayerClient(baseUrl, opts);
-  }
-  async submitBundle(transactions) {
-    const url = `${this.client.baseUrl}/solana/jito/bundle`;
-    const body = { transactions };
-    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', ...this.client.headers }, body: JSON.stringify(body) });
-    const json = await res.json();
-    if (!res.ok) throw new Error(JSON.stringify(json));
-    return json;
-  }
-}
-module.exports.RelayerClient = RelayerClient;
-module.exports.JitoRelayer = JitoRelayer;
-
-class BatchSender {
-  constructor(easyAgent) {
-    this.agent = easyAgent;
-    this.items = [];
-  }
-  addPayEth(to, amountWei, deadlineSec, opts) {
-    this.items.push({ t: "eth", to, amountWei, deadlineSec, opts });
-  }
-  addPayERC20(token, to, amount, deadlineSec, opts) {
-    this.items.push({ t: "erc20", token, to, amount, deadlineSec, opts });
-  }
-  addExecute(target, valueWei, data, deadlineSec) {
-    this.items.push({ t: "exec", target, valueWei, data, deadlineSec });
-  }
-  async send() {
-    const addr = await this.agent.ensureDeployed();
-    const res = [];
-    for (const it of this.items) {
-      if (it.t === "eth") {
-        const r = await this.agent.payEth(it.to, it.amountWei, it.deadlineSec, it.opts);
-        res.push(r);
-      } else if (it.t === "erc20") {
-        const r = await this.agent.payERC20(it.token, it.to, it.amount, it.deadlineSec, it.opts);
-        res.push(r);
-      } else if (it.t === "exec") {
-        const deadline = it.deadlineSec || Math.floor(Date.now() / 1000) + 3600;
-        const aiep = new AIEP(this.agent.ownerSigner, addr);
-        const r = await aiep.delegatedExecute(it.target, await normalizeWei(it.valueWei || 0n), it.data, deadline, this.agent.agentSigner);
-        res.push(r);
-      }
-    }
-    return res;
-  }
-}
-
-module.exports.BatchSender = BatchSender;
