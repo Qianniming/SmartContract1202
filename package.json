@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "test": "hardhat test",
-    "build": "cd dashboard && npm install && npm run build && cd .. && rm -rf dist && mv dashboard/dist dist"
+    "build": "cd dashboard && npm install --legacy-peer-deps && npm run build && cd .. && rm -rf dist && mv dashboard/dist dist"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^3.0.0",
