@@ -10,6 +10,9 @@
     "preview": "vite preview",
     "check": "tsc -b --noEmit"
   },
+  "overrides": {
+    "ethers": "6.13.1"
+  },
   "dependencies": {
     "@0glabs/0g-ts-sdk": "^0.3.3",
     "@headlessui/react": "^2.2.9",
